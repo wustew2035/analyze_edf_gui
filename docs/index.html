@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EDF+ Analysis GUI for Cadwell Arc Exports</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.55;
+      margin: 0;
+      color: #172033;
+      background: #f6f8fb;
+    }
+    header {
+      background: linear-gradient(135deg, #183b73, #3268b1);
+      color: white;
+      padding: 3rem 1.25rem;
+    }
+    main { max-width: 980px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    .hero { max-width: 980px; margin: 0 auto; }
+    .card {
+      background: white;
+      border: 1px solid #dfe6f2;
+      border-radius: 14px;
+      padding: 1.25rem 1.5rem;
+      margin: 1rem 0;
+      box-shadow: 0 8px 24px rgba(23,32,51,0.06);
+    }
+    code, pre {
+      background: #eef3fb;
+      border-radius: 6px;
+    }
+    code { padding: 0.1rem 0.3rem; }
+    pre { padding: 1rem; overflow-x: auto; }
+    img {
+      max-width: 100%;
+      height: auto;
+      border: 1px solid #dfe6f2;
+      border-radius: 10px;
+      background: white;
+    }
+    a { color: #174ea6; }
+    .button {
+      display: inline-block;
+      background: #174ea6;
+      color: white;
+      padding: 0.7rem 1rem;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      margin-right: 0.5rem;
+    }
+    .muted { color: #5f6b7a; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="hero">
+      <h1>EDF+ Analysis GUI for Cadwell Arc Exports</h1>
+      <p>Interactive Python/Tkinter GUI for reviewing EDF+ neurophysiology recordings exported from Cadwell's Arc software and generating baseline/event box-and-whisker plots.</p>
+      <p>
+        <a class="button" href="https://github.com/wustew2035/analyze_edf_gui">View on GitHub</a>
+        <a class="button" href="https://github.com/wustew2035/analyze_edf_gui/raw/main/analyze_edf_gui.py">Download Python script</a>
+      </p>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Purpose</h2>
+      <p>
+        This tool was developed for analyzing <strong>EDF+ files exported from Cadwell's Arc software</strong>.
+        It helps users choose a channel, select baseline and stimulation annotations, define time windows, filter the raw signal, compute an RMS envelope, and save a PNG box-and-whisker summary plot.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>Install dependencies</h2>
+      <p>Python 3.10 or newer is recommended.</p>
+      <pre><code>git clone https://github.com/wustew2035/analyze_edf_gui.git
+cd analyze_edf_gui
+pip install -r requirements.txt</code></pre>
+      <p>The required Python packages are:</p>
+      <ul>
+        <li><code>numpy</code> - numerical array processing</li>
+        <li><code>matplotlib</code> - signal previews and box-whisker plots</li>
+        <li><code>mne</code> - EDF/EDF+ loading, channel metadata, annotations, cropping, and filtering</li>
+        <li><code>scipy</code> - numerical/scientific backend used by MNE filtering routines</li>
+      </ul>
+      <p class="muted">The GUI also uses Python's standard <code>tkinter</code> module. On Linux, install it with <code>sudo apt-get install python3-tk</code> if needed.</p>
+    </section>
+
+    <section class="card">
+      <h2>Run the GUI</h2>
+      <pre><code>python analyze_edf_gui.py</code></pre>
+      <p>The program opens a file picker. Select an EDF+ file exported from Cadwell Arc.</p>
+    </section>
+
+    <section class="card">
+      <h2>Basic workflow</h2>
+      <ol>
+        <li>Select an EDF+ file.</li>
+        <li>Choose the channel of interest.</li>
+        <li>Set the bandpass filter limits.</li>
+        <li>Choose baseline only, stimulation only, or baseline plus stimulation.</li>
+        <li>Select the baseline annotation and baseline time window.</li>
+        <li>Select one or more stimulation/event annotations and the event time window.</li>
+        <li>Set the RMS smoothing window in milliseconds.</li>
+        <li>Run the final signal analysis and save the PNG output.</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>How raw signals become box-and-whisker plots</h2>
+      <ol>
+        <li><strong>Annotation-locked windowing:</strong> each selected annotation onset is used as time zero; the user-defined time window is applied around it.</li>
+        <li><strong>Channel extraction:</strong> only the selected signal channel is copied for analysis.</li>
+        <li><strong>Bandpass filtering:</strong> the selected window is filtered using the user-specified low and high cutoff frequencies.</li>
+        <li><strong>Conversion to microvolts:</strong> signal values returned by MNE are multiplied by 1,000,000 for plotting in µV.</li>
+        <li><strong>Moving RMS smoothing:</strong> the signal is squared, averaged in a moving window, and square-rooted to estimate local amplitude.</li>
+        <li><strong>Rectification:</strong> amplitudes are kept as non-negative values.</li>
+        <li><strong>Box-whisker plotting:</strong> the first box represents the baseline/pre-stimulus distribution; later boxes represent selected stimulation/event windows.</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>Sample output</h2>
+      <p>Example PNG output from the analysis workflow:</p>
+      <img src="data/sample_output.png" alt="Sample EDF analysis box-and-whisker output">
+    </section>
+
+    <section class="card">
+      <h2>Notes and limitations</h2>
+      <ul>
+        <li>The GUI is intended for interactive exploratory analysis, not automated batch statistics.</li>
+        <li>Results depend on correct channel, annotation, filter, and time-window selections.</li>
+        <li>Always visually inspect signal previews and confirm that annotations align with the intended physiological events.</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>
