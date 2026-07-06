@@ -55,7 +55,7 @@ else:
 @dataclass
 class AnalysisConfig:
     edf_path: str
-    channel: str | None
+    channels: list[str]
     bandpass_low_hz: float
     bandpass_high_hz: float
     analysis_mode: str
@@ -74,7 +74,8 @@ class EDFAnalysisSetupGUI:
         self.raw = None
         self.preview_window: tk.Toplevel | None = None
 
-        self.selected_channel = tk.StringVar(value="")
+        self.selected_channels: list[str] = []
+        self.selected_channels_display = tk.StringVar(value="No channels selected")
         self.low_hz = tk.StringVar(value="20")
         self.high_hz = tk.StringVar(value="450")
         self.analysis_mode = tk.StringVar(value="baseline_and_stimulation")
@@ -84,6 +85,7 @@ class EDFAnalysisSetupGUI:
         self.stim_tmax = tk.StringVar(value="60")
         self.rms_window_ms = tk.StringVar(value="100")
         self.custom_plot_title = tk.StringVar(value="")
+        self.custom_plot_titles: dict[str, str] = {}
         self.selected_baseline_annotation_indices: list[int] = []
         self.selected_stim_annotation_indices: list[int] = []
         self.baseline_annotation_display = tk.StringVar(value="No baseline annotation selected")
@@ -123,7 +125,7 @@ class EDFAnalysisSetupGUI:
             text="Choose channel...",
             command=self.choose_channel,
         ).grid(row=0, column=0, padx=(0, 8), pady=4, sticky=tk.W)
-        ttk.Label(channel_frame, textvariable=self.selected_channel, width=45).grid(
+        ttk.Label(channel_frame, textvariable=self.selected_channels_display, width=45, wraplength=360).grid(
             row=0, column=1, padx=(0, 16), sticky=tk.W
         )
 
@@ -218,13 +220,14 @@ class EDFAnalysisSetupGUI:
         top.pack(fill=tk.X)
         ttk.Label(top, text="RMS smoothing window, ms:").pack(side=tk.LEFT, padx=(0, 4))
         ttk.Entry(top, textvariable=self.rms_window_ms, width=8).pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(top, text="Custom plot title:").pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Entry(top, textvariable=self.custom_plot_title, width=32).pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Button(top, text="Run signal analysis and show box-whisker plot", command=self.run_signal_analysis).pack(side=tk.LEFT)
+        ttk.Label(top, text="Default plot title:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(top, textvariable=self.custom_plot_title, width=28).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(top, text="Set per-channel titles...", command=self.edit_custom_plot_titles).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Button(top, text="Run signal analysis and show box-whisker plot(s)", command=self.run_signal_analysis).pack(side=tk.LEFT)
         help_text = (
-            "Extracts selected channel windows, applies the subpart 1 bandpass, computes a moving RMS envelope, "
-            "rectifies it, and plots values in microvolts. First box: subpart 3 baseline ('pre-stimulus'); "
-            "subsequent boxes: subpart 4 stimulation annotations."
+            "For each selected channel, extracts windows, applies the subpart 1 bandpass, computes a moving RMS envelope, "
+            "rectifies it, and plots values in microvolts. Each selected channel produces a separate PNG-capable figure. "
+            "First box: subpart 3 baseline ('pre-stimulus'); subsequent boxes: subpart 4 stimulation annotations."
         )
         ttk.Label(parent, text=help_text, foreground="gray30", wraplength=900).pack(anchor=tk.W, pady=(4, 0), fill=tk.X)
 
@@ -246,7 +249,8 @@ class EDFAnalysisSetupGUI:
         )
         self.status.set(msg)
         if self.raw.ch_names:
-            self.selected_channel.set(self.raw.ch_names[0])
+            self.selected_channels = [self.raw.ch_names[0]]
+            self._update_channel_display()
 
         self._update_annotation_displays()
         self._update_enabled_sections()
@@ -258,12 +262,13 @@ class EDFAnalysisSetupGUI:
             return
 
         win = tk.Toplevel(self.root)
-        win.title("Choose channel of interest")
-        win.geometry("520x520")
+        win.title("Choose channels of interest")
+        win.geometry("560x560")
         win.transient(self.root)
         win.grab_set()
 
-        ttk.Label(win, text="Select one channel:").pack(anchor=tk.W, padx=10, pady=(10, 4))
+        ttk.Label(win, text="Select one or more channels:").pack(anchor=tk.W, padx=10, pady=(10, 4))
+        ttk.Label(win, text="Use Ctrl/Shift-click to select multiple channels. A vertical scrollbar is on the right.", foreground="gray30").pack(anchor=tk.W, padx=10)
         search_var = tk.StringVar(value="")
         search_entry = ttk.Entry(win, textvariable=search_var)
         search_entry.pack(fill=tk.X, padx=10, pady=(0, 6))
@@ -274,7 +279,7 @@ class EDFAnalysisSetupGUI:
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
         listbox = tk.Listbox(
             list_frame,
-            selectmode=tk.SINGLE,
+            selectmode=tk.EXTENDED,
             exportselection=False,
             yscrollcommand=scrollbar.set,
         )
@@ -282,26 +287,93 @@ class EDFAnalysisSetupGUI:
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        filtered_channels: list[str] = []
+        initial_set = set(self.selected_channels)
+
         def refresh_list(*_args):
             query = search_var.get().lower().strip()
             listbox.delete(0, tk.END)
+            filtered_channels.clear()
             for ch in self.raw.ch_names:
                 if not query or query in ch.lower():
+                    filtered_channels.append(ch)
                     listbox.insert(tk.END, ch)
+            for pos, ch in enumerate(filtered_channels):
+                if ch in initial_set:
+                    listbox.selection_set(pos)
 
         def accept_selection():
             selection = listbox.curselection()
             if not selection:
-                messagebox.showwarning("No channel selected", "Please select a channel.", parent=win)
+                messagebox.showwarning("No channel selected", "Please select one or more channels.", parent=win)
                 return
-            self.selected_channel.set(listbox.get(selection[0]))
+            self.selected_channels = [filtered_channels[pos] for pos in selection]
+            self._update_channel_display()
+            # Preserve existing per-channel titles for retained channels only.
+            self.custom_plot_titles = {ch: self.custom_plot_titles.get(ch, "") for ch in self.selected_channels if ch in self.custom_plot_titles}
             win.destroy()
+
+        def select_all_visible():
+            listbox.selection_set(0, tk.END)
+
+        button_frame = ttk.Frame(win)
+        button_frame.pack(fill=tk.X, padx=10, pady=(2, 10))
+        ttk.Button(button_frame, text="Use selected channel(s)", command=accept_selection).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text="Select all visible", command=select_all_visible).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(button_frame, text="Cancel", command=win.destroy).pack(side=tk.RIGHT, padx=(0, 8))
 
         search_var.trace_add("write", refresh_list)
         refresh_list()
-        ttk.Button(win, text="Use selected channel", command=accept_selection).pack(pady=(2, 10))
         listbox.bind("<Double-Button-1>", lambda _event: accept_selection())
         search_entry.focus_set()
+
+    def _update_channel_display(self) -> None:
+        if not self.selected_channels:
+            self.selected_channels_display.set("No channels selected")
+            return
+        shown = ", ".join(self.selected_channels[:4])
+        if len(self.selected_channels) > 4:
+            shown += f"; ... +{len(self.selected_channels) - 4} more"
+        self.selected_channels_display.set(f"Selected channels ({len(self.selected_channels)}): {shown}")
+
+    def edit_custom_plot_titles(self) -> None:
+        if not self.selected_channels:
+            messagebox.showwarning("No channels selected", "Choose one or more channels of interest first.")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Custom plot titles for selected channels")
+        win.geometry("720x420")
+        win.transient(self.root)
+        win.grab_set()
+
+        ttk.Label(win, text="Enter a distinct custom plot title for each selected channel. Blank uses the default title.").pack(anchor=tk.W, padx=10, pady=(10, 6))
+
+        canvas = tk.Canvas(win, borderwidth=0)
+        scrollbar = ttk.Scrollbar(win, orient=tk.VERTICAL, command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=6)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=6)
+
+        title_vars: dict[str, tk.StringVar] = {}
+        default_title = self.custom_plot_title.get().strip()
+        for row, ch in enumerate(self.selected_channels):
+            ttk.Label(inner, text=ch, width=28).grid(row=row, column=0, sticky=tk.W, padx=(0, 8), pady=3)
+            title_vars[ch] = tk.StringVar(value=self.custom_plot_titles.get(ch, default_title))
+            ttk.Entry(inner, textvariable=title_vars[ch], width=58).grid(row=row, column=1, sticky=tk.EW, pady=3)
+        inner.columnconfigure(1, weight=1)
+
+        def save_titles():
+            self.custom_plot_titles = {ch: title_vars[ch].get().strip() for ch in self.selected_channels}
+            win.destroy()
+
+        button_frame = ttk.Frame(win)
+        button_frame.pack(fill=tk.X, padx=10, pady=(2, 10))
+        ttk.Button(button_frame, text="Save titles", command=save_titles).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text="Cancel", command=win.destroy).pack(side=tk.RIGHT, padx=(0, 8))
 
     def _annotation_rows(self) -> list[tuple[int, float, float, str]]:
         if self.raw is None:
@@ -501,10 +573,10 @@ class EDFAnalysisSetupGUI:
         clipped_stop = min(stop_s, data_stop)
         return clipped_start, clipped_stop
 
-    def _extract_preview_data(self, onset_s: float, window: tuple[float, float]) -> tuple[np.ndarray, np.ndarray, str]:
+    def _extract_preview_data(self, onset_s: float, window: tuple[float, float], channel: str | None = None) -> tuple[np.ndarray, np.ndarray, str]:
         if self.raw is None:
             raise RuntimeError("EDF has not been loaded.")
-        ch = self.selected_channel.get().strip()
+        ch = (channel or (self.selected_channels[0] if self.selected_channels else "")).strip()
         if not ch:
             raise RuntimeError("No channel selected.")
         if ch not in self.raw.ch_names:
@@ -553,8 +625,8 @@ class EDFAnalysisSetupGUI:
         kernel = np.ones(window_samples, dtype=float) / float(window_samples)
         return np.sqrt(np.convolve(np.square(data), kernel, mode="same"))
 
-    def _extract_analysis_values(self, onset_s: float, window: tuple[float, float], rms_window_samples: int) -> np.ndarray:
-        _times, data_volts, _window_label = self._extract_preview_data(onset_s, window)
+    def _extract_analysis_values(self, onset_s: float, window: tuple[float, float], rms_window_samples: int, channel: str) -> np.ndarray:
+        _times, data_volts, _window_label = self._extract_preview_data(onset_s, window, channel=channel)
         data_uv = data_volts * 1_000_000.0
         rms_uv = self._moving_rms(data_uv, rms_window_samples)
         rectified_uv = np.abs(rms_uv)
@@ -571,8 +643,8 @@ class EDFAnalysisSetupGUI:
         if self.raw is None:
             messagebox.showwarning("No EDF", "EDF has not been loaded yet.")
             return
-        if not self.selected_channel.get().strip():
-            messagebox.showwarning("No channel selected", "Choose a channel of interest first.")
+        if not self.selected_channels:
+            messagebox.showwarning("No channel selected", "Choose one or more channels of interest first.")
             return
 
         mode = self.analysis_mode.get()
@@ -598,66 +670,79 @@ class EDFAnalysisSetupGUI:
         if rms_window_samples is None:
             return
 
-        labels: list[str] = []
-        datasets: list[np.ndarray] = []
-        errors: list[str] = []
+        all_errors: list[str] = []
+        figures_made = 0
+        for channel in self.selected_channels:
+            labels: list[str] = []
+            datasets: list[np.ndarray] = []
+            errors: list[str] = []
 
-        baseline_idx = baseline_selection[0]
-        baseline_onset, _duration, _desc = self._get_annotation_by_index(baseline_idx)
-        try:
-            datasets.append(self._extract_analysis_values(baseline_onset, baseline_window, rms_window_samples))
-            labels.append("pre-stimulus")
-        except Exception as exc:
-            errors.append(f"baseline #{baseline_idx}: {exc}")
+            baseline_idx = baseline_selection[0]
+            baseline_onset, _duration, _desc = self._get_annotation_by_index(baseline_idx)
+            try:
+                datasets.append(self._extract_analysis_values(baseline_onset, baseline_window, rms_window_samples, channel))
+                labels.append("pre-stimulus")
+            except Exception as exc:
+                errors.append(f"{channel} baseline #{baseline_idx}: {exc}")
 
-        annotation_occurrences: dict[str, int] = {}
-        if stim_window is not None:
-            for idx in stim_selection:
-                onset, _duration, desc = self._get_annotation_by_index(idx)
-                try:
-                    datasets.append(self._extract_analysis_values(onset, stim_window, rms_window_samples))
-                    annotation_occurrences[desc] = annotation_occurrences.get(desc, 0) + 1
-                    occurrence = annotation_occurrences[desc]
-                    labels.append(desc if occurrence == 1 else f"{desc}_{occurrence}")
-                except Exception as exc:
-                    errors.append(f"stimulation #{idx}: {exc}")
+            annotation_occurrences: dict[str, int] = {}
+            if stim_window is not None:
+                for idx in stim_selection:
+                    onset, _duration, desc = self._get_annotation_by_index(idx)
+                    try:
+                        datasets.append(self._extract_analysis_values(onset, stim_window, rms_window_samples, channel))
+                        annotation_occurrences[desc] = annotation_occurrences.get(desc, 0) + 1
+                        occurrence = annotation_occurrences[desc]
+                        labels.append(desc if occurrence == 1 else f"{desc}_{occurrence}")
+                    except Exception as exc:
+                        errors.append(f"{channel} stimulation #{idx}: {exc}")
 
-        if not datasets:
-            messagebox.showerror("Analysis error", "No analysis windows could be processed:\n" + "\n".join(errors[:8]))
+            if not datasets:
+                all_errors.extend(errors)
+                continue
+
+            fig_width = max(8, 1.4 * len(datasets) + 3)
+            fig = Figure(figsize=(fig_width, 5.5), dpi=120)
+            ax = fig.add_subplot(111)
+            bp = ax.boxplot(
+                datasets,
+                tick_labels=labels,
+                showfliers=True,
+                patch_artist=True,
+                flierprops={"marker": "o", "markersize": 2, "markerfacecolor": "none", "markeredgewidth": 0.6},
+            )
+            for patch in bp.get("boxes", []):
+                patch.set_facecolor("#d9eaf7")
+            ax.set_ylabel("Amplitude (µV)")
+            ax.set_xlabel("Event")
+            title = self.custom_plot_titles.get(channel, "").strip() or self.custom_plot_title.get().strip() or f"{channel} signal analysis"
+            ax.set_title(title)
+            ax.grid(True, axis="y", alpha=0.25)
+            ax.tick_params(axis="x", labelrotation=90)
+            fig.subplots_adjust(left=0.16, right=0.98, bottom=0.34, top=0.90)
+
+            subtitle = (
+                f"Channel: {channel}; Bandpass {self.low_hz.get()}-{self.high_hz.get()} Hz; "
+                f"RMS window {self.rms_window_ms.get()} ms; values rectified and plotted in µV"
+            )
+            figures_made += 1
+            self._show_figure(
+                fig,
+                subtitle,
+                window_title=f"EDF signal analysis - {channel}",
+                default_png_name=self._default_analysis_png_name(channel),
+                replace_existing=False,
+            )
+            all_errors.extend(errors)
+
+        if figures_made == 0:
+            messagebox.showerror("Analysis error", "No analysis windows could be processed:\n" + "\n".join(all_errors[:8]))
             return
+        if all_errors:
+            messagebox.showwarning("Some analysis windows skipped", "Some windows could not be analyzed:\n" + "\n".join(all_errors[:8]))
 
-        fig_width = max(8, 1.4 * len(datasets) + 3)
-        fig = Figure(figsize=(fig_width, 5.5), dpi=120)
-        ax = fig.add_subplot(111)
-        bp = ax.boxplot(
-            datasets,
-            tick_labels=labels,
-            showfliers=True,
-            patch_artist=True,
-            flierprops={"marker": "o", "markersize": 2, "markerfacecolor": "none", "markeredgewidth": 0.6},
-        )
-        for patch in bp.get("boxes", []):
-            patch.set_facecolor("#d9eaf7")
-        ax.set_ylabel("Amplitude (µV)")
-        ax.set_xlabel("Event")
-        ax.set_title(self.custom_plot_title.get().strip())
-        ax.grid(True, axis="y", alpha=0.25)
-        ax.tick_params(axis="x", labelrotation=90)
-        # Use explicit margins so the embedded Tk preview canvas does not clip
-        # y-axis tick numbers/label or vertical x-axis labels. Saved PNGs use
-        # bbox_inches="tight", but the on-screen canvas needs reserved space.
-        fig.subplots_adjust(left=0.16, right=0.98, bottom=0.34, top=0.90)
-
-        subtitle = (
-            f"Bandpass {self.low_hz.get()}-{self.high_hz.get()} Hz; "
-            f"RMS window {self.rms_window_ms.get()} ms; values rectified and plotted in µV"
-        )
-        if errors:
-            messagebox.showwarning("Some analysis windows skipped", "Some windows could not be analyzed:\n" + "\n".join(errors[:8]))
-        self._show_figure(fig, subtitle, window_title="EDF signal analysis", default_png_name=self._default_analysis_png_name())
-
-    def _default_analysis_png_name(self) -> str:
-        channel = self.selected_channel.get().strip() or "channel"
+    def _default_analysis_png_name(self, channel: str | None = None) -> str:
+        channel = (channel or (self.selected_channels[0] if self.selected_channels else "channel")).strip() or "channel"
         safe_channel = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in channel).strip("_") or "channel"
         return f"{Path(self.edf_path).stem}_{safe_channel}_boxwhisker.png"
 
@@ -771,7 +856,7 @@ class EDFAnalysisSetupGUI:
         ax.set_xlim(window[0], window[1])
         ax.set_title(title)
         ax.set_xlabel("Time relative to selected annotation (s)")
-        ax.set_ylabel(self.selected_channel.get())
+        ax.set_ylabel(self.selected_channels[0] if self.selected_channels else "")
         ax.grid(True, alpha=0.25)
         ax.legend(loc="upper right")
         fig.tight_layout()
@@ -798,7 +883,7 @@ class EDFAnalysisSetupGUI:
             self._add_annotation_markers(ax, idx, onset, window, show_text=False)
             ax.set_xlim(window[0], window[1])
             ax.set_title(f"#{idx}: {desc} ({window_label})", fontsize=9)
-            ax.set_ylabel(self.selected_channel.get(), fontsize=8)
+            ax.set_ylabel(self.selected_channels[0] if self.selected_channels else "", fontsize=8)
             ax.grid(True, alpha=0.25)
             if plot_i == len(indices):
                 ax.set_xlabel("Time relative to selected annotation (s)")
@@ -819,24 +904,26 @@ class EDFAnalysisSetupGUI:
         *,
         window_title: str = "EDF window preview",
         default_png_name: str | None = None,
+        replace_existing: bool = True,
     ) -> None:
         if FigureCanvasTkAgg is None:
             messagebox.showerror("Missing dependency", f"Matplotlib is required for figures:\n{MPL_IMPORT_ERROR}")
             return
 
-        if self.preview_window is not None and self.preview_window.winfo_exists():
+        if replace_existing and self.preview_window is not None and self.preview_window.winfo_exists():
             self.preview_window.destroy()
 
-        self.preview_window = tk.Toplevel(self.root)
-        self.preview_window.title(window_title)
-        self.preview_window.geometry("1100x700")
+        fig_window = tk.Toplevel(self.root)
+        self.preview_window = fig_window
+        fig_window.title(window_title)
+        fig_window.geometry("1100x700")
 
-        ttk.Label(self.preview_window, text=title, wraplength=1050).pack(anchor=tk.W, padx=10, pady=(8, 2))
-        canvas = FigureCanvasTkAgg(fig, master=self.preview_window)
+        ttk.Label(fig_window, text=title, wraplength=1050).pack(anchor=tk.W, padx=10, pady=(8, 2))
+        canvas = FigureCanvasTkAgg(fig, master=fig_window)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        button_frame = ttk.Frame(self.preview_window)
+        button_frame = ttk.Frame(fig_window)
         button_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
 
         def save_png() -> None:
@@ -846,13 +933,13 @@ class EDFAnalysisSetupGUI:
                 defaultextension=".png",
                 initialfile=initialfile,
                 filetypes=[("PNG image", "*.png"), ("All files", "*.*")],
-                parent=self.preview_window,
+                parent=fig_window,
             )
             if not out_path:
                 return
             fig.savefig(out_path, dpi=300, bbox_inches="tight")
             self.status.set(f"Saved PNG figure: {out_path}")
-            messagebox.showinfo("Saved", f"Saved PNG figure:\n{out_path}", parent=self.preview_window)
+            messagebox.showinfo("Saved", f"Saved PNG figure:\n{out_path}", parent=fig_window)
 
         ttk.Button(button_frame, text="Save PNG...", command=save_png).pack(side=tk.RIGHT)
 
@@ -901,7 +988,7 @@ class EDFAnalysisSetupGUI:
 
         return AnalysisConfig(
             edf_path=self.edf_path,
-            channel=self.selected_channel.get().strip() or None,
+            channels=list(self.selected_channels),
             bandpass_low_hz=bp[0],
             bandpass_high_hz=bp[1],
             analysis_mode=mode,
