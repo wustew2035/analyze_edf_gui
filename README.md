@@ -1,8 +1,8 @@
 # EDF+ Analysis GUI for Cadwell Arc Exports
 
-Interactive Python/Tkinter GUI for reviewing and analyzing EDF+ files exported from **Cadwell's Arc software**. The tool is designed for neurophysiology signal review workflows where an EDF+ file contains signal channels and annotation/event markers.
+Interactive Python/Tkinter GUI for reviewing and analyzing EDF+ files exported from **Cadwell's Arc software**. Current release: **1.0.0**. The tool is designed for neurophysiology signal review workflows where an EDF+ file contains signal channels and annotation/event markers.
 
-The main output is a box-and-whisker plot comparing a selected baseline/pre-stimulus window with one or more event-locked stimulation windows.
+The main output is a box-and-whisker plot comparing a selected baseline/pre-stimulus window with one or more event-locked stimulation windows. If multiple channels of interest are selected, the program generates a separate PNG output for each selected channel.
 
 ![Sample box-whisker output](data/sample_output.png)
 
@@ -62,7 +62,7 @@ This code was developed for analyzing **EDF+ files exported from Cadwell's Arc s
 ## Basic workflow
 
 1. Select an EDF+ file.
-2. Choose the channel of interest.
+2. Choose one or more channels of interest. The channel picker supports multi-select and includes a vertical scrollbar for long channel lists.
 3. Set the bandpass filter limits.
 4. Choose the analysis mode:
    - baseline and stimulation,
@@ -71,8 +71,8 @@ This code was developed for analyzing **EDF+ files exported from Cadwell's Arc s
 5. Select the baseline annotation and baseline time window.
 6. Select one or more stimulation/event annotations and the event time window.
 7. Set the RMS smoothing window in milliseconds.
-8. Optionally enter a custom plot title.
-9. Run final signal analysis and save the PNG output.
+8. Optionally enter a default custom plot title and/or distinct per-channel plot titles.
+9. Run final signal analysis and save the PNG output. Multiple selected channels produce separate PNG-capable figures, one per selected channel.
 
 ## How raw signal is processed for the box-whisker plots
 
@@ -85,7 +85,7 @@ For each selected baseline or event annotation, the program processes the select
    - Windows are clipped to the available EDF recording bounds when needed.
 
 2. **Channel extraction**
-   - Only the selected channel of interest is copied from the EDF data for each analysis window.
+   - Each selected channel of interest is copied and processed separately from the EDF data for each analysis window.
 
 3. **Bandpass filtering**
    - The windowed signal is filtered using the user-specified low and high cutoff frequencies.
@@ -114,6 +114,7 @@ For each selected baseline or event annotation, the program processes the select
    - The first box is the selected baseline/pre-stimulus window.
    - Subsequent boxes are the selected stimulation/event windows.
    - Duplicate event labels are automatically suffixed, for example `event`, `event_2`, `event_3`.
+   - If multiple channels of interest are chosen, a separate PNG is generated for each selected channel.
    - Outliers are shown as small open circles.
    - The y-axis reports amplitude in `µV`; the x-axis is labeled `Event`.
 

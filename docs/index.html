@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>EDF+ Analysis GUI for Cadwell Arc Exports</title>
+  <title>EDF+ Analysis GUI for Cadwell Arc Exports - Release 1.0.0</title>
   <style>
     :root { color-scheme: light; }
     body {
@@ -59,6 +59,7 @@
   <header>
     <div class="hero">
       <h1>EDF+ Analysis GUI for Cadwell Arc Exports</h1>
+      <p class="muted" style="color:#dbe8ff;">Release 1.0.0</p>
       <p>Interactive Python/Tkinter GUI for reviewing EDF+ neurophysiology recordings exported from Cadwell's Arc software and generating baseline/event box-and-whisker plots.</p>
       <p>
         <a class="button" href="https://github.com/wustew2035/analyze_edf_gui">View on GitHub</a>
@@ -72,8 +73,18 @@
       <h2>Purpose</h2>
       <p>
         This tool was developed for analyzing <strong>EDF+ files exported from Cadwell's Arc software</strong>.
-        It helps users choose a channel, select baseline and stimulation annotations, define time windows, filter the raw signal, compute an RMS envelope, and save a PNG box-and-whisker summary plot.
+        It helps users choose one or more channels, select baseline and stimulation annotations, define time windows, filter the raw signal, compute an RMS envelope, and save PNG box-and-whisker summary plots.
       </p>
+    </section>
+
+
+    <section class="card">
+      <h2>Release 1.0.0 highlights</h2>
+      <ul>
+        <li>Select multiple channels of interest in one analysis run.</li>
+        <li>Generate a separate PNG output for each selected channel of interest.</li>
+        <li>Assign distinct custom plot titles for individual channel PNG outputs.</li>
+      </ul>
     </section>
 
     <section class="card">
@@ -102,13 +113,14 @@ pip install -r requirements.txt</code></pre>
       <h2>Basic workflow</h2>
       <ol>
         <li>Select an EDF+ file.</li>
-        <li>Choose the channel of interest.</li>
+        <li>Choose one or more channels of interest. The channel-selection popup supports multi-select and includes a vertical scrollbar for long channel lists.</li>
         <li>Set the bandpass filter limits.</li>
         <li>Choose baseline only, stimulation only, or baseline plus stimulation.</li>
         <li>Select the baseline annotation and baseline time window.</li>
         <li>Select one or more stimulation/event annotations and the event time window.</li>
         <li>Set the RMS smoothing window in milliseconds.</li>
-        <li>Run the final signal analysis and save the PNG output.</li>
+        <li>Optionally enter a default plot title and/or distinct per-channel plot titles.</li>
+        <li>Run the final signal analysis and save the PNG output. If multiple channels of interest are selected, the program generates a separate PNG-capable figure for each selected channel.</li>
       </ol>
     </section>
 
@@ -116,12 +128,12 @@ pip install -r requirements.txt</code></pre>
       <h2>How raw signals become box-and-whisker plots</h2>
       <ol>
         <li><strong>Annotation-locked windowing:</strong> each selected annotation onset is used as time zero; the user-defined time window is applied around it.</li>
-        <li><strong>Channel extraction:</strong> only the selected signal channel is copied for analysis.</li>
+        <li><strong>Channel extraction:</strong> each selected signal channel is processed separately for analysis.</li>
         <li><strong>Bandpass filtering:</strong> the selected window is filtered using the user-specified low and high cutoff frequencies.</li>
         <li><strong>Conversion to microvolts:</strong> signal values returned by MNE are multiplied by 1,000,000 for plotting in µV.</li>
         <li><strong>Moving RMS smoothing:</strong> the signal is squared, averaged in a moving window, and square-rooted to estimate local amplitude.</li>
         <li><strong>Rectification:</strong> amplitudes are kept as non-negative values.</li>
-        <li><strong>Box-whisker plotting:</strong> the first box represents the baseline/pre-stimulus distribution; later boxes represent selected stimulation/event windows.</li>
+        <li><strong>Box-whisker plotting:</strong> the first box represents the baseline/pre-stimulus distribution; later boxes represent selected stimulation/event windows. When multiple channels are selected, each channel receives its own box-whisker figure and PNG output.</li>
       </ol>
     </section>
 
