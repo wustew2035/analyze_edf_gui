@@ -60,7 +60,7 @@
     <div class="hero">
       <h1>EDF+ Analysis GUI for Cadwell Arc Exports</h1>
       <p class="muted" style="color:#dbe8ff;">Release 1.0.0</p>
-      <p>Interactive Python/Tkinter GUI for reviewing EDF+ neurophysiology recordings exported from Cadwell's Arc software and generating baseline/event box-and-whisker plots.</p>
+      <p>Interactive Python/Tkinter GUI written primarily to analyze EMG signals in EDF+ neurophysiology recordings exported from Cadwell's Arc software and generate baseline/event box-and-whisker plots.</p>
       <p>
         <a class="button" href="https://github.com/wustew2035/analyze_edf_gui">View on GitHub</a>
         <a class="button" href="https://github.com/wustew2035/analyze_edf_gui/raw/main/analyze_edf_gui.py">Download Python script</a>
@@ -72,8 +72,8 @@
     <section class="card">
       <h2>Purpose</h2>
       <p>
-        This tool was developed for analyzing <strong>EDF+ files exported from Cadwell's Arc software</strong>.
-        It helps users choose one or more channels, select baseline and stimulation annotations, define time windows, filter the raw signal, compute an RMS envelope, and save PNG box-and-whisker summary plots.
+        This tool was developed primarily for analyzing <strong>EMG signals</strong> stored in <strong>EDF+ files exported from Cadwell's Arc software</strong>.
+        It helps users choose one or more EMG channels, select baseline and stimulation annotations, define time windows, filter the raw signal, compute an RMS envelope, and save PNG box-and-whisker summary plots.
       </p>
     </section>
 
@@ -128,7 +128,7 @@ pip install -r requirements.txt</code></pre>
       <h2>How raw signals become box-and-whisker plots</h2>
       <ol>
         <li><strong>Annotation-locked windowing:</strong> each selected annotation onset is used as time zero; the user-defined time window is applied around it.</li>
-        <li><strong>Channel extraction:</strong> each selected signal channel is processed separately for analysis.</li>
+        <li><strong>Channel extraction:</strong> each selected EMG signal channel is processed separately for analysis.</li>
         <li><strong>Bandpass filtering:</strong> the selected window is filtered using the user-specified low and high cutoff frequencies.</li>
         <li><strong>Conversion to microvolts:</strong> signal values returned by MNE are multiplied by 1,000,000 for plotting in µV.</li>
         <li><strong>Moving RMS smoothing:</strong> the signal is squared, averaged in a moving window, and square-rooted to estimate local amplitude.</li>
@@ -146,7 +146,7 @@ pip install -r requirements.txt</code></pre>
     <section class="card">
       <h2>Notes and limitations</h2>
       <ul>
-        <li>The GUI is intended for interactive exploratory analysis, not automated batch statistics.</li>
+        <li>The GUI is intended primarily for interactive exploratory EMG analysis, not automated batch statistics.</li>
         <li>Results depend on correct channel, annotation, filter, and time-window selections.</li>
         <li>Always visually inspect signal previews and confirm that annotations align with the intended physiological events.</li>
       </ul>
