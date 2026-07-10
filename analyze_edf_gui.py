@@ -774,8 +774,9 @@ class EDFAnalysisSetupGUI:
         if window is None:
             return
 
-        # For many selected annotations, preview the first up to 8 in stacked subplots.
-        self._preview_multiple(selection[:8], window, title=f"Stimulation preview ({min(len(selection), 8)} of {len(selection)} selected)")
+        # Preview every selected stimulation annotation. The figure window is scrollable,
+        # so large selections can be reviewed without truncating the subplot list.
+        self._preview_multiple(selection, window, title=f"Stimulation preview ({len(selection)} selected)")
 
     def _annotations_in_window(self, anchor_onset: float, window: tuple[float, float]) -> list[tuple[int, float, float, str]]:
         """Return annotation onsets that fall inside a preview window, in anchor-relative seconds."""
