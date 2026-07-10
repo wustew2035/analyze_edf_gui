@@ -919,9 +919,48 @@ class EDFAnalysisSetupGUI:
         fig_window.geometry("1100x700")
 
         ttk.Label(fig_window, text=title, wraplength=1050).pack(anchor=tk.W, padx=10, pady=(8, 2))
-        canvas = FigureCanvasTkAgg(fig, master=fig_window)
+
+        # Matplotlib figures with many stacked subplots can be taller than the
+        # preview window. Put the FigureCanvasTkAgg widget inside a scrollable
+        # Tk canvas so the user can scroll down to every subplot.
+        scroll_frame = ttk.Frame(fig_window)
+        scroll_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        tk_scroll_canvas = tk.Canvas(scroll_frame, highlightthickness=0)
+        y_scrollbar = ttk.Scrollbar(scroll_frame, orient=tk.VERTICAL, command=tk_scroll_canvas.yview)
+        tk_scroll_canvas.configure(yscrollcommand=y_scrollbar.set)
+        tk_scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        y_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        canvas = FigureCanvasTkAgg(fig, master=tk_scroll_canvas)
         canvas.draw()
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        figure_widget = canvas.get_tk_widget()
+        canvas_window_id = tk_scroll_canvas.create_window((0, 0), window=figure_widget, anchor=tk.NW)
+
+        def _update_scroll_region(_event=None) -> None:
+            tk_scroll_canvas.configure(scrollregion=tk_scroll_canvas.bbox(tk.ALL))
+            # Keep narrower figures expanded to the visible scroll area while
+            # preserving natural height for vertical scrolling.
+            visible_width = tk_scroll_canvas.winfo_width()
+            natural_width = figure_widget.winfo_reqwidth()
+            tk_scroll_canvas.itemconfigure(canvas_window_id, width=max(visible_width, natural_width))
+
+        def _on_mousewheel(event) -> None:
+            if event.num == 4:  # Linux scroll up
+                delta = -1
+            elif event.num == 5:  # Linux scroll down
+                delta = 1
+            else:
+                delta = int(-1 * (event.delta / 120))
+            tk_scroll_canvas.yview_scroll(delta, "units")
+
+        figure_widget.bind("<Configure>", _update_scroll_region)
+        tk_scroll_canvas.bind("<Configure>", _update_scroll_region)
+        for widget in (tk_scroll_canvas, figure_widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            widget.bind("<Button-4>", _on_mousewheel)
+            widget.bind("<Button-5>", _on_mousewheel)
+        _update_scroll_region()
 
         button_frame = ttk.Frame(fig_window)
         button_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
