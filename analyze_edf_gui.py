@@ -41,11 +41,12 @@ else:
 try:
     import matplotlib
     matplotlib.use("TkAgg")
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
     from matplotlib.figure import Figure
 except ImportError as exc:  # handled in preview
     matplotlib = None
     FigureCanvasTkAgg = None
+    NavigationToolbar2Tk = None
     Figure = None
     MPL_IMPORT_ERROR = exc
 else:
@@ -651,16 +652,18 @@ class EDFAnalysisSetupGUI:
         baseline_selection = self._selected_annotation_indices("baseline") if mode != "stimulation" else []
         stim_selection = self._selected_annotation_indices("stimulation") if mode != "baseline" else []
 
-        if not baseline_selection:
+        if mode != "stimulation" and not baseline_selection:
             messagebox.showwarning("No baseline annotation", "Select one baseline annotation in subpart 3 first.")
             return
         if mode != "baseline" and not stim_selection:
             messagebox.showwarning("No stimulation annotations", "Select one or more stimulation annotations in subpart 4 first.")
             return
 
-        baseline_window = self._parse_float_pair(self.baseline_tmin, self.baseline_tmax, "Baseline window")
-        if baseline_window is None:
-            return
+        baseline_window = None
+        if baseline_selection:
+            baseline_window = self._parse_float_pair(self.baseline_tmin, self.baseline_tmax, "Baseline window")
+            if baseline_window is None:
+                return
         stim_window = None
         if stim_selection:
             stim_window = self._parse_float_pair(self.stim_tmin, self.stim_tmax, "Stimulation window")
@@ -677,13 +680,14 @@ class EDFAnalysisSetupGUI:
             datasets: list[np.ndarray] = []
             errors: list[str] = []
 
-            baseline_idx = baseline_selection[0]
-            baseline_onset, _duration, _desc = self._get_annotation_by_index(baseline_idx)
-            try:
-                datasets.append(self._extract_analysis_values(baseline_onset, baseline_window, rms_window_samples, channel))
-                labels.append("pre-stimulus")
-            except Exception as exc:
-                errors.append(f"{channel} baseline #{baseline_idx}: {exc}")
+            if baseline_selection and baseline_window is not None:
+                baseline_idx = baseline_selection[0]
+                baseline_onset, _duration, _desc = self._get_annotation_by_index(baseline_idx)
+                try:
+                    datasets.append(self._extract_analysis_values(baseline_onset, baseline_window, rms_window_samples, channel))
+                    labels.append("pre-stimulus")
+                except Exception as exc:
+                    errors.append(f"{channel} baseline #{baseline_idx}: {exc}")
 
             annotation_occurrences: dict[str, int] = {}
             if stim_window is not None:
@@ -929,9 +933,13 @@ class EDFAnalysisSetupGUI:
 
         tk_scroll_canvas = tk.Canvas(scroll_frame, highlightthickness=0)
         y_scrollbar = ttk.Scrollbar(scroll_frame, orient=tk.VERTICAL, command=tk_scroll_canvas.yview)
-        tk_scroll_canvas.configure(yscrollcommand=y_scrollbar.set)
-        tk_scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        y_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        x_scrollbar = ttk.Scrollbar(scroll_frame, orient=tk.HORIZONTAL, command=tk_scroll_canvas.xview)
+        tk_scroll_canvas.configure(yscrollcommand=y_scrollbar.set, xscrollcommand=x_scrollbar.set)
+        tk_scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        y_scrollbar.grid(row=0, column=1, sticky="ns")
+        x_scrollbar.grid(row=1, column=0, sticky="ew")
+        scroll_frame.rowconfigure(0, weight=1)
+        scroll_frame.columnconfigure(0, weight=1)
 
         canvas = FigureCanvasTkAgg(fig, master=tk_scroll_canvas)
         canvas.draw()
@@ -940,11 +948,13 @@ class EDFAnalysisSetupGUI:
 
         def _update_scroll_region(_event=None) -> None:
             tk_scroll_canvas.configure(scrollregion=tk_scroll_canvas.bbox(tk.ALL))
-            # Keep narrower figures expanded to the visible scroll area while
-            # preserving natural height for vertical scrolling.
-            visible_width = tk_scroll_canvas.winfo_width()
-            natural_width = figure_widget.winfo_reqwidth()
-            tk_scroll_canvas.itemconfigure(canvas_window_id, width=max(visible_width, natural_width))
+            # Preserve the figure's natural dimensions; scrollbars expose any
+            # portion that does not fit in the pop-up window.
+            tk_scroll_canvas.itemconfigure(
+                canvas_window_id,
+                width=figure_widget.winfo_reqwidth(),
+                height=figure_widget.winfo_reqheight(),
+            )
 
         def _on_mousewheel(event) -> None:
             if event.num == 4:  # Linux scroll up
@@ -981,7 +991,27 @@ class EDFAnalysisSetupGUI:
             self.status.set(f"Saved PNG figure: {out_path}")
             messagebox.showinfo("Saved", f"Saved PNG figure:\n{out_path}", parent=fig_window)
 
+        original_size = tuple(fig.get_size_inches())
+
+        def set_zoom(factor: float) -> None:
+            width, height = fig.get_size_inches()
+            fig.set_size_inches(width * factor, height * factor, forward=True)
+            canvas.draw()
+            fig_window.after_idle(_update_scroll_region)
+
+        def reset_zoom() -> None:
+            fig.set_size_inches(*original_size, forward=True)
+            canvas.draw()
+            fig_window.after_idle(_update_scroll_region)
+
         ttk.Button(button_frame, text="Save PNG...", command=save_png).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text="Reset zoom", command=reset_zoom).pack(side=tk.LEFT)
+        ttk.Button(button_frame, text="Zoom out −", command=lambda: set_zoom(0.8)).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(button_frame, text="Zoom in +", command=lambda: set_zoom(1.25)).pack(side=tk.LEFT, padx=(6, 0))
+        if NavigationToolbar2Tk is not None:
+            toolbar = NavigationToolbar2Tk(canvas, button_frame, pack_toolbar=False)
+            toolbar.update()
+            toolbar.pack(side=tk.LEFT, padx=(14, 0))
 
     # ------------------------- Config/save -------------------------
     def _update_enabled_sections(self) -> None:
