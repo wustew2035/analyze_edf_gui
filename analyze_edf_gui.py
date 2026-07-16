@@ -723,6 +723,10 @@ class EDFAnalysisSetupGUI:
             ax.set_title(title)
             ax.grid(True, axis="y", alpha=0.25)
             ax.tick_params(axis="x", labelrotation=90)
+            # Reserve explicit figure margins for the vertical event labels,
+            # x-axis label, and title. These margins remain valid when the
+            # display is zoomed, provided the viewer does not shrink the
+            # figure below its readable minimum size (enforced in _show_figure).
             fig.subplots_adjust(left=0.16, right=0.98, bottom=0.34, top=0.90)
 
             subtitle = (
@@ -1006,6 +1010,12 @@ class EDFAnalysisSetupGUI:
             messagebox.showinfo("Saved", f"Saved PNG figure:\n{out_path}", parent=fig_window)
 
         original_size = tuple(fig.get_size_inches())
+        # A Matplotlib figure can technically be made arbitrarily small, but
+        # below this size its fixed-size title and axis-label artists no longer
+        # fit within the available renderer area and are clipped. Keep enough
+        # physical canvas area for those artists while still permitting useful
+        # zoom-out from large multi-event analysis figures.
+        min_zoom_size = (5.0, 4.0)
 
         def _redraw_after_resize() -> None:
             """Resize the Tk widget before redrawing to prevent stale canvas pixels."""
@@ -1021,7 +1031,11 @@ class EDFAnalysisSetupGUI:
 
         def set_zoom(factor: float) -> None:
             width, height = fig.get_size_inches()
-            fig.set_size_inches(width * factor, height * factor, forward=True)
+            target_width = max(min_zoom_size[0], width * factor)
+            target_height = max(min_zoom_size[1], height * factor)
+            if (target_width, target_height) == (width, height):
+                return
+            fig.set_size_inches(target_width, target_height, forward=True)
             _redraw_after_resize()
 
         def reset_zoom() -> None:
