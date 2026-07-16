@@ -819,6 +819,19 @@ class EDFAnalysisSetupGUI:
                     linewidth=1.1,
                     label=("selected annotation" if first_anchor else None),
                 )
+                if show_text:
+                    short_desc = desc if len(desc) <= 24 else desc[:21] + "..."
+                    ax.text(
+                        rel_onset,
+                        text_y,
+                        f"#{idx} {short_desc}",
+                        rotation=90,
+                        va="top",
+                        ha="right",
+                        fontsize=7,
+                        color="red",
+                        alpha=0.9,
+                    )
                 first_anchor = False
             else:
                 ax.axvline(
@@ -885,7 +898,8 @@ class EDFAnalysisSetupGUI:
             plotted += 1
             ax = fig.add_subplot(len(indices), 1, plot_i)
             ax.plot(times, data, linewidth=0.7)
-            self._add_annotation_markers(ax, idx, onset, window, show_text=False)
+            # Label every event marker, including the selected anchor event.
+            self._add_annotation_markers(ax, idx, onset, window, show_text=True)
             ax.set_xlim(window[0], window[1])
             ax.set_title(f"#{idx}: {desc} ({window_label})", fontsize=9)
             ax.set_ylabel(self.selected_channels[0] if self.selected_channels else "", fontsize=8)
@@ -993,16 +1007,26 @@ class EDFAnalysisSetupGUI:
 
         original_size = tuple(fig.get_size_inches())
 
+        def _redraw_after_resize() -> None:
+            """Resize the Tk widget before redrawing to prevent stale canvas pixels."""
+            # FigureCanvasTkAgg does not always update its Tk widget's dimensions
+            # after a programmatic figure resize. Explicitly resizing the widget
+            # clears the old backing buffer, preventing an old larger plot from
+            # remaining visible behind a zoomed-out plot.
+            pixel_width, pixel_height = canvas.get_width_height(physical=True)
+            figure_widget.configure(width=pixel_width, height=pixel_height)
+            canvas.draw()
+            figure_widget.update_idletasks()
+            _update_scroll_region()
+
         def set_zoom(factor: float) -> None:
             width, height = fig.get_size_inches()
             fig.set_size_inches(width * factor, height * factor, forward=True)
-            canvas.draw()
-            fig_window.after_idle(_update_scroll_region)
+            _redraw_after_resize()
 
         def reset_zoom() -> None:
             fig.set_size_inches(*original_size, forward=True)
-            canvas.draw()
-            fig_window.after_idle(_update_scroll_region)
+            _redraw_after_resize()
 
         ttk.Button(button_frame, text="Save PNG...", command=save_png).pack(side=tk.RIGHT)
         ttk.Button(button_frame, text="Reset zoom", command=reset_zoom).pack(side=tk.LEFT)
