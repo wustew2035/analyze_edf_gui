@@ -103,6 +103,7 @@ class EDFAnalysisSetupGUI:
         self.selected_channels_display = tk.StringVar(value="No channels selected")
         self.low_hz = tk.StringVar(value="20")
         self.high_hz = tk.StringVar(value="450")
+        self.notch_60_enabled = tk.BooleanVar(value=False)
         self.analysis_mode = tk.StringVar(value="baseline_and_stimulation")
         self.baseline_tmin = tk.StringVar(value="-45")
         self.baseline_tmax = tk.StringVar(value="-1")
@@ -117,7 +118,9 @@ class EDFAnalysisSetupGUI:
         self.coherence_low_hz = tk.StringVar(value="4")
         self.coherence_high_hz = tk.StringVar(value="12")
         self.coherence_segment_s = tk.StringVar(value="1")
-        self.psd_segment_s = tk.StringVar(value="1")
+        self.psd_segment_s = tk.StringVar(value="0.5")
+        self.psd_xmin_hz = tk.StringVar(value="1")
+        self.psd_xmax_hz = tk.StringVar(value="45")
         self._session_p95_cache: dict[tuple[object, ...], dict[str, float]] = {}
         self.custom_plot_title = tk.StringVar(value="")
         self.custom_plot_titles: dict[str, str] = {}
@@ -199,6 +202,8 @@ class EDFAnalysisSetupGUI:
         ttk.Entry(channel_frame, textvariable=self.low_hz, width=8).grid(row=0, column=3, padx=(0, 12))
         ttk.Label(channel_frame, text="Bandpass high Hz:").grid(row=0, column=4, padx=(0, 4))
         ttk.Entry(channel_frame, textvariable=self.high_hz, width=8).grid(row=0, column=5)
+        ttk.Checkbutton(channel_frame, text="Apply 60 Hz notch to raw signal (all analyses)",
+                        variable=self.notch_60_enabled).grid(row=1, column=0, columnspan=6, sticky=tk.W, pady=(4, 0))
 
         # Subpart 2: analysis mode
         mode_frame = ttk.LabelFrame(
@@ -386,10 +391,14 @@ class EDFAnalysisSetupGUI:
         top.pack(fill=tk.X)
         ttk.Label(top, text="Welch segment (s):").pack(side=tk.LEFT, padx=(0, 4))
         ttk.Entry(top, textvariable=self.psd_segment_s, width=6).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(top, text="X-axis (Hz):").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(top, textvariable=self.psd_xmin_hz, width=5).pack(side=tk.LEFT)
+        ttk.Label(top, text="to").pack(side=tk.LEFT, padx=4)
+        ttk.Entry(top, textvariable=self.psd_xmax_hz, width=5).pack(side=tk.LEFT, padx=(0, 12))
         ttk.Button(top, text="Run 5d Welch PSD analysis", command=self.run_psd_analysis).pack(side=tk.LEFT)
         ttk.Label(parent, text=(
-            "Uses the selected baseline/stimulation event windows and all selected channels. Each window uses the raw signal with a 60 Hz notch filter "
-            "(subpart 1 bandpass settings are not applied), then displays Welch power spectral density (dB re 1 µV²/Hz). "
+            "Uses the selected baseline/stimulation event windows and all selected channels. Computes Welch PSD from the raw signal; "
+            "the optional 60 Hz notch in section 1 is applied only when its checkbox is enabled (subpart 1 bandpass settings are not applied). "
             "The segment length controls frequency resolution and averaging; it is capped at each window's available duration."
         ), foreground="gray30", wraplength=900).pack(anchor=tk.W, pady=(4, 0), fill=tk.X)
 
@@ -760,6 +769,11 @@ class EDFAnalysisSetupGUI:
 
         raw_segment = self.raw.copy().pick([ch]).crop(tmin=start_s, tmax=stop_s, include_tmax=False)
         raw_segment.load_data(verbose="ERROR")
+        if self.notch_60_enabled.get():
+            sfreq = float(raw_segment.info["sfreq"])
+            if sfreq / 2.0 <= 60.0:
+                raise RuntimeError(f"Sampling rate {sfreq:g} Hz is too low for a 60 Hz notch filter.")
+            raw_segment.notch_filter(freqs=[60.0], picks=[ch], verbose="ERROR")
         raw_segment.filter(l_freq=low, h_freq=high, picks=[ch], verbose="ERROR")
         data = raw_segment.get_data(picks=[ch])[0]
         times = raw_segment.times + start_s - onset_s  # relative to window anchor
@@ -778,13 +792,14 @@ class EDFAnalysisSetupGUI:
             raise RuntimeError(f"Requested window is outside data bounds after clipping: {start_s:.3f} to {stop_s:.3f} s")
         raw_segment = self.raw.copy().pick([channel]).crop(tmin=start_s, tmax=stop_s, include_tmax=False)
         raw_segment.load_data(verbose="ERROR")
-        # Remove mains interference while retaining all other raw signal content.
-        sfreq = float(raw_segment.info["sfreq"])
-        if sfreq / 2.0 <= 60.0:
-            raise RuntimeError(f"Sampling rate {sfreq:g} Hz is too low for a 60 Hz notch filter.")
-        raw_segment.notch_filter(freqs=[60.0], picks=[channel], verbose="ERROR")
-        data = raw_segment.get_data(picks=[channel])[0]
+        # Apply optional notch to the raw channel for all downstream analyses.
+        if self.notch_60_enabled.get():
+            sfreq = float(raw_segment.info["sfreq"])
+            if sfreq / 2.0 <= 60.0:
+                raise RuntimeError(f"Sampling rate {sfreq:g} Hz is too low for a 60 Hz notch filter.")
+            raw_segment.notch_filter(freqs=[60.0], picks=[channel], verbose="ERROR")
         times = raw_segment.times + start_s - onset_s
+        data = raw_segment.get_data(picks=[channel])[0]
         window_label = f"absolute {start_s:.3f}-{stop_s:.3f} s; relative {times[0]:.3f}-{times[-1]:.3f} s"
         return times, data, window_label
 
@@ -1032,7 +1047,18 @@ class EDFAnalysisSetupGUI:
         except ValueError:
             messagebox.showerror("Invalid input", "Welch segment length must be greater than zero seconds.")
             return
+        try:
+            xmin = float(self.psd_xmin_hz.get())
+            xmax = float(self.psd_xmax_hz.get())
+            if xmin < 0 or xmax <= xmin:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid input", "PSD x-axis limits must be numeric, with 0 ≤ minimum < maximum.")
+            return
         sfreq = float(self.raw.info["sfreq"])
+        if xmax > sfreq / 2.0:
+            messagebox.showerror("Invalid input", f"PSD x-axis maximum must not exceed the Nyquist frequency ({sfreq / 2.0:g} Hz).")
+            return
         requested_nperseg = max(2, int(round(segment_s * sfreq)))
         _low, high = self._get_bandpass() or (None, None)
         results, errors = [], []
@@ -1044,7 +1070,8 @@ class EDFAnalysisSetupGUI:
                     nperseg = min(len(data_volts), requested_nperseg)
                     if nperseg < 4:
                         raise RuntimeError("Window is too short for Welch PSD estimation.")
-                    freq, power_v2_hz = welch(data_volts, fs=sfreq, nperseg=nperseg, detrend="constant")
+                    noverlap = int(round(0.50 * nperseg))
+                    freq, power_v2_hz = welch(data_volts, fs=sfreq, nperseg=nperseg, noverlap=noverlap, detrend="constant")
                     power_db = 10.0 * np.log10(np.maximum(power_v2_hz * 1_000_000_000_000.0, np.finfo(float).tiny))
                     spectra.append((channel, freq, power_db, nperseg))
                 except Exception as exc:
@@ -1059,7 +1086,7 @@ class EDFAnalysisSetupGUI:
         # The lower bound is padded slightly below the most negative PSD value so no
         # trace is clipped while retaining a scale appropriate to this analysis run.
         displayed_power = np.concatenate([
-            power_db[np.isfinite(power_db) & (freq >= 0) & (freq <= high)]
+            power_db[np.isfinite(power_db) & (freq >= xmin) & (freq <= xmax)]
             for _label, spectra in results
             for _channel, freq, power_db, _nperseg in spectra
         ])
@@ -1076,7 +1103,7 @@ class EDFAnalysisSetupGUI:
             ax = fig.add_subplot(len(results), 1, index)
             for channel, freq, power_db, _nperseg in spectra:
                 ax.plot(freq, power_db, label=channel, lw=1.0)
-            ax.set_xlim(0, high)
+            ax.set_xlim(xmin, xmax)
             ax.set_ylim(common_ymin, common_ymax)
             ax.set_ylabel("PSD (dB re 1 µV²/Hz)")
             ax.set_title(label, loc="left", fontsize=9)
@@ -1087,7 +1114,7 @@ class EDFAnalysisSetupGUI:
         actual_segments = sorted({nperseg for _label, spectra in results for _ch, _freq, _power, nperseg in spectra})
         segment_note = ", ".join(f"{n / sfreq:g} s" for n in actual_segments)
         fig.subplots_adjust(left=.11, right=.98, bottom=.10, top=.95, hspace=.55)
-        subtitle = (f"5d: Welch PSD of raw, unfiltered signal; "
+        subtitle = (f"5d: Welch PSD of raw signal; 60 Hz notch {'on' if self.notch_60_enabled.get() else 'off'}; "
                     f"requested segment {segment_s:g} s; used segment(s) {segment_note}")
         self._show_figure(
             fig,
