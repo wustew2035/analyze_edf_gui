@@ -2,6 +2,17 @@
 """
 Interactive EDF analysis setup GUI.
 
+Change log:
+- 2026-09-17: Added Step 5b for exactly two surface-EMG channels: session-wide
+  95th-percentile normalization, RMS-envelope overlap co-contraction index (CCI),
+  common-activation magnitude, simultaneous-activation percentage, and event-level plots.
+- 2026-09-17: Added Step 5c for exactly two surface-EMG channels: intermuscular
+  magnitude-squared coherence spectra and event-level band-mean summaries. The default
+  4-12 Hz band is informed by PMID 39700629; this is a shared-drive/synchrony measure,
+  not an amplitude co-contraction or joint-stiffness measure.
+- 2026-09-25: Added Step 5d: per-event Welch power spectral-density plots for one or
+  more selected bandpass-filtered channels.
+
 Current scope:
 1. Open a file chooser to select an EDF file.
 2. Open a second GUI with four setup subparts:
@@ -12,10 +23,10 @@ Current scope:
    - Final signal analysis: bandpass, RMS smoothing, rectification, and box-whisker plot
 
 Dependencies:
-    pip install mne matplotlib numpy
+    pip install mne matplotlib numpy scipy
 
 Recommended run from this project:
-    python outputs/analyze_edf_gui.py
+    python analyze_edf_gui.py
 """
 
 from __future__ import annotations
@@ -52,6 +63,15 @@ except ImportError as exc:  # handled in preview
 else:
     MPL_IMPORT_ERROR = None
 
+try:
+    from scipy.signal import coherence, welch
+except ImportError as exc:  # handled in Step 5c
+    coherence = None
+    welch = None
+    SCIPY_IMPORT_ERROR = exc
+else:
+    SCIPY_IMPORT_ERROR = None
+
 
 @dataclass
 class AnalysisConfig:
@@ -64,6 +84,10 @@ class AnalysisConfig:
     baseline_window_s: tuple[float, float] | None
     stimulation_annotations: list[str]
     stimulation_window_s: tuple[float, float] | None
+    baseline_boundary_annotations: list[str] | None = None
+    stimulation_boundary_pairs: list[list[str]] | None = None
+    baseline_window_mode: str = "relative"
+    stimulation_window_mode: str = "relative"
 
 
 class EDFAnalysisSetupGUI:
@@ -84,7 +108,17 @@ class EDFAnalysisSetupGUI:
         self.baseline_tmax = tk.StringVar(value="-1")
         self.stim_tmin = tk.StringVar(value="0")
         self.stim_tmax = tk.StringVar(value="60")
+        self.baseline_window_mode = tk.StringVar(value="relative")
+        self.stim_window_mode = tk.StringVar(value="relative")
+        self.baseline_pair_indices: list[int] = []
+        self.stim_pair_indices: list[tuple[int, int]] = []
         self.rms_window_ms = tk.StringVar(value="100")
+        self.cci_threshold_pct = tk.StringVar(value="10")
+        self.coherence_low_hz = tk.StringVar(value="4")
+        self.coherence_high_hz = tk.StringVar(value="12")
+        self.coherence_segment_s = tk.StringVar(value="1")
+        self.psd_segment_s = tk.StringVar(value="1")
+        self._session_p95_cache: dict[tuple[object, ...], dict[str, float]] = {}
         self.custom_plot_title = tk.StringVar(value="")
         self.custom_plot_titles: dict[str, str] = {}
         self.selected_baseline_annotation_indices: list[int] = []
@@ -102,8 +136,39 @@ class EDFAnalysisSetupGUI:
         self.root.geometry("1000x780")
         self.root.minsize(900, 650)
 
-        outer = ttk.Frame(self.root, padding=12)
-        outer.pack(fill=tk.BOTH, expand=True)
+        # Keep the complete setup visible on ordinary laptop displays.  Steps 5b-5d
+        # extend the form beyond the initial window height, so place the
+        # content in a vertically scrollable canvas rather than clipping its end.
+        scroll_canvas = tk.Canvas(self.root, highlightthickness=0)
+        y_scrollbar = ttk.Scrollbar(self.root, orient=tk.VERTICAL, command=scroll_canvas.yview)
+        scroll_canvas.configure(yscrollcommand=y_scrollbar.set)
+        y_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        outer = ttk.Frame(scroll_canvas, padding=12)
+        outer_window = scroll_canvas.create_window((0, 0), window=outer, anchor=tk.NW)
+
+        def _update_scroll_region(_event: tk.Event | None = None) -> None:
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+
+        def _fit_content_width(event: tk.Event) -> None:
+            scroll_canvas.itemconfigure(outer_window, width=event.width)
+
+        outer.bind("<Configure>", _update_scroll_region)
+        scroll_canvas.bind("<Configure>", _fit_content_width)
+
+        def _mousewheel(event: tk.Event) -> None:
+            # Windows/macOS report delta; X11 reports mouse buttons 4 and 5.
+            if event.delta:
+                scroll_canvas.yview_scroll(-int(event.delta / 120), "units")
+            elif event.num == 4:
+                scroll_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                scroll_canvas.yview_scroll(1, "units")
+
+        scroll_canvas.bind_all("<MouseWheel>", _mousewheel)
+        scroll_canvas.bind_all("<Button-4>", _mousewheel)
+        scroll_canvas.bind_all("<Button-5>", _mousewheel)
 
         title = ttk.Label(
             outer,
@@ -175,9 +240,21 @@ class EDFAnalysisSetupGUI:
         self.stim_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         self._build_stimulation_section(self.stim_frame)
 
-        self.analysis_frame = ttk.LabelFrame(outer, text="5. Final signal analysis", padding=10)
+        self.analysis_frame = ttk.LabelFrame(outer, text="5a. RMS amplitude analysis", padding=10)
         self.analysis_frame.pack(fill=tk.X, pady=5)
         self._build_analysis_section(self.analysis_frame)
+
+        self.cocontraction_frame = ttk.LabelFrame(outer, text="5b. Two-channel surface-EMG co-contraction", padding=10)
+        self.cocontraction_frame.pack(fill=tk.X, pady=5)
+        self._build_cocontraction_section(self.cocontraction_frame)
+
+        self.coherence_frame = ttk.LabelFrame(outer, text="5c. Two-channel intermuscular coherence", padding=10)
+        self.coherence_frame.pack(fill=tk.X, pady=5)
+        self._build_coherence_section(self.coherence_frame)
+
+        self.psd_frame = ttk.LabelFrame(outer, text="5d. Welch spectral density analysis", padding=10)
+        self.psd_frame.pack(fill=tk.X, pady=5)
+        self._build_psd_section(self.psd_frame)
 
         # Footer
         footer = ttk.Frame(outer)
@@ -187,34 +264,78 @@ class EDFAnalysisSetupGUI:
         ttk.Button(footer, text="Close", command=self.root.destroy).pack(side=tk.RIGHT)
 
     def _build_baseline_section(self, parent: ttk.Frame) -> None:
-        top = ttk.Frame(parent)
-        top.pack(fill=tk.X)
-
-        ttk.Button(top, text="Choose baseline annotation...", command=self.choose_baseline_annotation).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(top, text="Window relative to annotation, seconds:").pack(side=tk.LEFT, padx=(8, 4))
-        ttk.Entry(top, textvariable=self.baseline_tmin, width=8).pack(side=tk.LEFT)
-        ttk.Label(top, text="to").pack(side=tk.LEFT, padx=4)
-        ttk.Entry(top, textvariable=self.baseline_tmax, width=8).pack(side=tk.LEFT)
-        ttk.Button(top, text="Preview baseline window", command=self.preview_baseline).pack(side=tk.LEFT, padx=12)
-
-        help_text = "Select one baseline annotation. Example window: -45 to -1 seconds. Ignored for stimulation-only mode."
-        ttk.Label(parent, text=help_text, foreground="gray30").pack(anchor=tk.W, pady=(4, 2))
+        mode = ttk.Frame(parent); mode.pack(fill=tk.X)
+        ttk.Radiobutton(mode, text="Relative time window", variable=self.baseline_window_mode, value="relative", command=self._refresh_window_controls).pack(side=tk.LEFT)
+        ttk.Radiobutton(mode, text="Between annotation pair", variable=self.baseline_window_mode, value="pair", command=self._refresh_window_controls).pack(side=tk.LEFT, padx=10)
+        self.baseline_relative_controls = ttk.Frame(parent); self.baseline_relative_controls.pack(fill=tk.X)
+        ttk.Button(self.baseline_relative_controls, text="Choose baseline annotation...", command=self.choose_baseline_annotation).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(self.baseline_relative_controls, text="Window relative to annotation (s):").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Entry(self.baseline_relative_controls, textvariable=self.baseline_tmin, width=8).pack(side=tk.LEFT)
+        ttk.Label(self.baseline_relative_controls, text="to").pack(side=tk.LEFT, padx=4)
+        ttk.Entry(self.baseline_relative_controls, textvariable=self.baseline_tmax, width=8).pack(side=tk.LEFT)
+        self.baseline_pair_controls = ttk.Frame(parent); self.baseline_pair_controls.pack(fill=tk.X)
+        ttk.Button(self.baseline_pair_controls, text="Choose start/end annotation pair...", command=self.choose_baseline_pair).pack(side=tk.LEFT)
+        self.baseline_pair_display = tk.StringVar(value="No annotation pair selected")
+        ttk.Label(self.baseline_pair_controls, textvariable=self.baseline_pair_display, wraplength=800).pack(side=tk.LEFT, padx=8)
+        ttk.Button(parent, text="Preview baseline window", command=self.preview_baseline).pack(anchor=tk.W, pady=4)
+        ttk.Label(parent, text="Pair mode uses the interval between two selected annotation onsets. Ignored for stimulation-only mode.", foreground="gray30").pack(anchor=tk.W)
         ttk.Label(parent, textvariable=self.baseline_annotation_display, wraplength=900).pack(anchor=tk.W, pady=(4, 0), fill=tk.X)
 
     def _build_stimulation_section(self, parent: ttk.Frame) -> None:
-        top = ttk.Frame(parent)
-        top.pack(fill=tk.X)
-
-        ttk.Button(top, text="Choose stimulation annotation(s)...", command=self.choose_stim_annotations).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(top, text="Window relative to annotation, seconds:").pack(side=tk.LEFT, padx=(8, 4))
-        ttk.Entry(top, textvariable=self.stim_tmin, width=8).pack(side=tk.LEFT)
-        ttk.Label(top, text="to").pack(side=tk.LEFT, padx=4)
-        ttk.Entry(top, textvariable=self.stim_tmax, width=8).pack(side=tk.LEFT)
-        ttk.Button(top, text="Preview stimulation window(s)", command=self.preview_stimulation).pack(side=tk.LEFT, padx=12)
-
-        help_text = "Select one or more stimulation annotations. Example window: 0 to +60 seconds. Ignored for baseline-only mode."
-        ttk.Label(parent, text=help_text, foreground="gray30").pack(anchor=tk.W, pady=(4, 2))
+        mode = ttk.Frame(parent); mode.pack(fill=tk.X)
+        ttk.Radiobutton(mode, text="Relative time window", variable=self.stim_window_mode, value="relative", command=self._refresh_window_controls).pack(side=tk.LEFT)
+        ttk.Radiobutton(mode, text="Between annotation pairs", variable=self.stim_window_mode, value="pair", command=self._refresh_window_controls).pack(side=tk.LEFT, padx=10)
+        self.stim_relative_controls = ttk.Frame(parent); self.stim_relative_controls.pack(fill=tk.X)
+        ttk.Button(self.stim_relative_controls, text="Choose stimulation annotation(s)...", command=self.choose_stim_annotations).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(self.stim_relative_controls, text="Window relative to annotation (s):").pack(side=tk.LEFT, padx=(8, 4))
+        ttk.Entry(self.stim_relative_controls, textvariable=self.stim_tmin, width=8).pack(side=tk.LEFT)
+        ttk.Label(self.stim_relative_controls, text="to").pack(side=tk.LEFT, padx=4)
+        ttk.Entry(self.stim_relative_controls, textvariable=self.stim_tmax, width=8).pack(side=tk.LEFT)
+        self.stim_pair_controls = ttk.Frame(parent); self.stim_pair_controls.pack(fill=tk.X)
+        ttk.Button(self.stim_pair_controls, text="Add annotation pair(s)...", command=self.choose_stim_pairs).pack(side=tk.LEFT)
+        self.stim_pair_display = tk.StringVar(value="No annotation pairs selected")
+        ttk.Label(self.stim_pair_controls, textvariable=self.stim_pair_display, wraplength=800).pack(side=tk.LEFT, padx=8)
+        ttk.Button(parent, text="Preview stimulation window(s)", command=self.preview_stimulation).pack(anchor=tk.W, pady=4)
+        ttk.Label(parent, text="Pair mode creates one segment per pair; segment lengths may differ. Ignored for baseline-only mode.", foreground="gray30").pack(anchor=tk.W)
         ttk.Label(parent, textvariable=self.stim_annotation_display, wraplength=900).pack(anchor=tk.W, pady=(4, 0), fill=tk.X)
+        self._refresh_window_controls()
+
+    def _refresh_window_controls(self) -> None:
+        if hasattr(self, "baseline_relative_controls"):
+            (self.baseline_relative_controls.pack if self.baseline_window_mode.get() == "relative" else self.baseline_relative_controls.pack_forget)()
+            (self.baseline_pair_controls.pack if self.baseline_window_mode.get() == "pair" else self.baseline_pair_controls.pack_forget)()
+        if hasattr(self, "stim_relative_controls"):
+            (self.stim_relative_controls.pack if self.stim_window_mode.get() == "relative" else self.stim_relative_controls.pack_forget)()
+            (self.stim_pair_controls.pack if self.stim_window_mode.get() == "pair" else self.stim_pair_controls.pack_forget)()
+
+    def _annotation_pair_window(self, indices: tuple[int, int]) -> tuple[float, tuple[float, float], str]:
+        first, second = (self._get_annotation_by_index(i) for i in indices)
+        start, stop = first[0], second[0]
+        if stop <= start:
+            raise ValueError("The end annotation must occur after the start annotation.")
+        return start, (0.0, stop-start), f"{first[2]} → {second[2]}"
+
+    def choose_baseline_pair(self) -> None:
+        selected=self._choose_annotations_dialog("Choose baseline boundary pair", "Select exactly two annotations in chronological order (start then end):", True, self.baseline_pair_indices)
+        if selected is not None:
+            if len(selected) != 2:
+                messagebox.showwarning("Choose a pair", "Select exactly two annotations."); return
+            try: self._annotation_pair_window(tuple(selected))
+            except ValueError as exc: messagebox.showerror("Invalid pair", str(exc)); return
+            self.baseline_pair_indices=selected
+            self.baseline_pair_display.set(" → ".join(f"#{i} {self._get_annotation_by_index(i)[2]}" for i in selected))
+
+    def choose_stim_pairs(self) -> None:
+        selected=self._choose_annotations_dialog("Choose stimulation boundary annotations", "Select an even number of annotations; consecutive selections form start/end pairs in chronological order:", True, [i for pair in self.stim_pair_indices for i in pair])
+        if selected is None: return
+        if len(selected)<2 or len(selected)%2:
+            messagebox.showwarning("Incomplete pairs", "Select at least two annotations and an even number overall."); return
+        pairs=[tuple(selected[i:i+2]) for i in range(0,len(selected),2)]
+        try:
+            for pair in pairs: self._annotation_pair_window(pair)
+        except ValueError as exc: messagebox.showerror("Invalid pair", str(exc)); return
+        self.stim_pair_indices=pairs
+        self.stim_pair_display.set("; ".join(f"#{a} {self._get_annotation_by_index(a)[2]} → #{b} {self._get_annotation_by_index(b)[2]}" for a,b in pairs))
 
     def _build_analysis_section(self, parent: ttk.Frame) -> None:
         top = ttk.Frame(parent)
@@ -231,6 +352,46 @@ class EDFAnalysisSetupGUI:
             "First box: subpart 3 baseline ('pre-stimulus'); subsequent boxes: subpart 4 stimulation annotations."
         )
         ttk.Label(parent, text=help_text, foreground="gray30", wraplength=900).pack(anchor=tk.W, pady=(4, 0), fill=tk.X)
+
+    def _build_cocontraction_section(self, parent: ttk.Frame) -> None:
+        top = ttk.Frame(parent)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Simultaneous-activation threshold (% of session P95):").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(top, textvariable=self.cci_threshold_pct, width=7).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Button(top, text="Run 5b co-contraction analysis", command=self.run_cocontraction_analysis).pack(side=tk.LEFT)
+        ttk.Label(parent, text=(
+            "Requires exactly two anatomically opposing surface-EMG channels. Each channel is filtered and RMS-smoothed, "
+            "then divided by its session-wide 95th-percentile RMS value. Reports event-level CCI (overlap; 0-100%), "
+            "common activation, and percent simultaneous activation. CCI is not joint stiffness or dystonia severity."
+        ), foreground="gray30", wraplength=900).pack(anchor=tk.W, pady=(4, 0), fill=tk.X)
+
+    def _build_coherence_section(self, parent: ttk.Frame) -> None:
+        top = ttk.Frame(parent)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Summary band (Hz):").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(top, textvariable=self.coherence_low_hz, width=6).pack(side=tk.LEFT)
+        ttk.Label(top, text="to").pack(side=tk.LEFT, padx=4)
+        ttk.Entry(top, textvariable=self.coherence_high_hz, width=6).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(top, text="Welch segment (s):").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(top, textvariable=self.coherence_segment_s, width=6).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Button(top, text="Run 5c coherence analysis", command=self.run_coherence_analysis).pack(side=tk.LEFT)
+        ttk.Label(parent, text=(
+            "Requires exactly two surface-EMG channels and matched event windows. Computes magnitude-squared intermuscular "
+            "coherence on bandpass-filtered EMG (not RMS envelopes); the default 4-12 Hz summary band is informed by PMID 39700629. "
+            "Coherence indexes frequency-specific synchrony/shared drive, not amplitude co-contraction."
+        ), foreground="gray30", wraplength=900).pack(anchor=tk.W, pady=(4, 0), fill=tk.X)
+
+    def _build_psd_section(self, parent: ttk.Frame) -> None:
+        top = ttk.Frame(parent)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Welch segment (s):").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Entry(top, textvariable=self.psd_segment_s, width=6).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Button(top, text="Run 5d Welch PSD analysis", command=self.run_psd_analysis).pack(side=tk.LEFT)
+        ttk.Label(parent, text=(
+            "Uses the selected baseline/stimulation event windows and all selected channels. Each window uses the raw signal with a 60 Hz notch filter "
+            "(subpart 1 bandpass settings are not applied), then displays Welch power spectral density (dB re 1 µV²/Hz). "
+            "The segment length controls frequency resolution and averaging; it is capped at each window's available duration."
+        ), foreground="gray30", wraplength=900).pack(anchor=tk.W, pady=(4, 0), fill=tk.X)
 
     # ------------------------- EDF loading -------------------------
     def _load_edf(self) -> None:
@@ -310,6 +471,7 @@ class EDFAnalysisSetupGUI:
                 return
             self.selected_channels = [filtered_channels[pos] for pos in selection]
             self._update_channel_display()
+            self._session_p95_cache.clear()
             # Preserve existing per-channel titles for retained channels only.
             self.custom_plot_titles = {ch: self.custom_plot_titles.get(ch, "") for ch in self.selected_channels if ch in self.custom_plot_titles}
             win.destroy()
@@ -600,7 +762,29 @@ class EDFAnalysisSetupGUI:
         raw_segment.load_data(verbose="ERROR")
         raw_segment.filter(l_freq=low, h_freq=high, picks=[ch], verbose="ERROR")
         data = raw_segment.get_data(picks=[ch])[0]
-        times = raw_segment.times + start_s - onset_s  # relative to annotation onset
+        times = raw_segment.times + start_s - onset_s  # relative to window anchor
+        window_label = f"absolute {start_s:.3f}-{stop_s:.3f} s; relative {times[0]:.3f}-{times[-1]:.3f} s"
+        return times, data, window_label
+
+    def _extract_raw_window_data(self, onset_s: float, window: tuple[float, float], channel: str) -> tuple[np.ndarray, np.ndarray, str]:
+        """Extract an event window without applying the GUI bandpass filter."""
+        if self.raw is None:
+            raise RuntimeError("EDF has not been loaded.")
+        if channel not in self.raw.ch_names:
+            raise RuntimeError(f"Selected channel not found in EDF: {channel}")
+        tmin_rel, tmax_rel = window
+        start_s, stop_s = self._clip_window_to_data(onset_s + tmin_rel, onset_s + tmax_rel)
+        if stop_s <= start_s:
+            raise RuntimeError(f"Requested window is outside data bounds after clipping: {start_s:.3f} to {stop_s:.3f} s")
+        raw_segment = self.raw.copy().pick([channel]).crop(tmin=start_s, tmax=stop_s, include_tmax=False)
+        raw_segment.load_data(verbose="ERROR")
+        # Remove mains interference while retaining all other raw signal content.
+        sfreq = float(raw_segment.info["sfreq"])
+        if sfreq / 2.0 <= 60.0:
+            raise RuntimeError(f"Sampling rate {sfreq:g} Hz is too low for a 60 Hz notch filter.")
+        raw_segment.notch_filter(freqs=[60.0], picks=[channel], verbose="ERROR")
+        data = raw_segment.get_data(picks=[channel])[0]
+        times = raw_segment.times + start_s - onset_s
         window_label = f"absolute {start_s:.3f}-{stop_s:.3f} s; relative {times[0]:.3f}-{times[-1]:.3f} s"
         return times, data, window_label
 
@@ -636,7 +820,285 @@ class EDFAnalysisSetupGUI:
             raise RuntimeError("Analysis window contained no finite samples after processing.")
         return rectified_uv
 
+    def _analysis_events(self) -> list[tuple[str, float, tuple[float, float]]] | None:
+        """Return baseline/stimulation segments for the selected window modes."""
+        mode=self.analysis_mode.get(); events=[]
+        if mode != "stimulation":
+            if self.baseline_window_mode.get()=="pair":
+                if len(self.baseline_pair_indices)!=2:
+                    messagebox.showwarning("No baseline pair", "Choose a start/end annotation pair in section 3."); return None
+                try: onset, window, label=self._annotation_pair_window(tuple(self.baseline_pair_indices))
+                except ValueError as exc: messagebox.showerror("Invalid pair",str(exc)); return None
+                events.append((f"baseline: {label}",onset,window))
+            else:
+                baseline=self._selected_annotation_indices("baseline")
+                if not baseline: messagebox.showwarning("No baseline annotation", "Select one baseline annotation in subpart 3 first."); return None
+                window=self._parse_float_pair(self.baseline_tmin,self.baseline_tmax,"Baseline window")
+                if window is None: return None
+                onset,_,_=self._get_annotation_by_index(baseline[0]); events.append(("pre-stimulus",onset,window))
+        if mode != "baseline":
+            if self.stim_window_mode.get()=="pair":
+                if not self.stim_pair_indices: messagebox.showwarning("No stimulation pairs", "Choose one or more annotation pairs in section 4."); return None
+                for n,pair in enumerate(self.stim_pair_indices,1):
+                    try: onset,window,label=self._annotation_pair_window(pair)
+                    except ValueError as exc: messagebox.showerror("Invalid pair",str(exc)); return None
+                    events.append((f"segment {n}: {label}",onset,window))
+            else:
+                stim=self._selected_annotation_indices("stimulation")
+                if not stim: messagebox.showwarning("No stimulation annotations", "Select one or more stimulation annotations in subpart 4 first."); return None
+                window=self._parse_float_pair(self.stim_tmin,self.stim_tmax,"Stimulation window")
+                if window is None: return None
+                occurrences={}
+                for idx in stim:
+                    onset,_,desc=self._get_annotation_by_index(idx); occurrences[desc]=occurrences.get(desc,0)+1
+                    label=desc if occurrences[desc]==1 else f"{desc}_{occurrences[desc]}"
+                    events.append((label,onset,window))
+        return events
+
+    def _require_two_emg_channels(self) -> list[str] | None:
+        if self.raw is None:
+            messagebox.showwarning("No EDF", "EDF has not been loaded yet.")
+            return None
+        if len(self.selected_channels) != 2:
+            messagebox.showwarning("Exactly two EMG channels required", "Step 5b/5c requires exactly two anatomically opposing surface-EMG channels.")
+            return None
+        return list(self.selected_channels)
+
+    def _session_p95_rms(self, channels: list[str], rms_window_samples: int) -> dict[str, float]:
+        """Compute per-channel session-wide P95 RMS in µV using the current bandpass."""
+        low, high = self._get_bandpass() or (None, None)
+        if low is None:
+            raise RuntimeError("Invalid bandpass settings.")
+        key = (tuple(channels), low, high, rms_window_samples)
+        if key in self._session_p95_cache:
+            return self._session_p95_cache[key]
+        segment = self.raw.copy().pick(channels)
+        segment.load_data(verbose="ERROR")
+        segment.filter(l_freq=low, h_freq=high, picks=channels, verbose="ERROR")
+        values: dict[str, float] = {}
+        for ch, trace in zip(channels, segment.get_data()):
+            p95 = float(np.nanpercentile(self._moving_rms(trace * 1_000_000.0, rms_window_samples), 95))
+            if not np.isfinite(p95) or p95 <= 0:
+                raise RuntimeError(f"Session-wide P95 RMS is invalid for {ch}.")
+            values[ch] = p95
+        self._session_p95_cache[key] = values
+        return values
+
+    def _extract_pair(self, onset: float, window: tuple[float, float], channels: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        t1, x1, _ = self._extract_preview_data(onset, window, channels[0])
+        t2, x2, _ = self._extract_preview_data(onset, window, channels[1])
+        n = min(len(t1), len(t2), len(x1), len(x2))
+        if n < 2:
+            raise RuntimeError("Matched event window has fewer than two samples.")
+        return t1[:n], x1[:n], x2[:n]
+
+    def run_cocontraction_analysis(self) -> None:
+        if Figure is None or FigureCanvasTkAgg is None:
+            messagebox.showerror("Missing dependency", f"Matplotlib is required for analysis figures:\n{MPL_IMPORT_ERROR}")
+            return
+        channels = self._require_two_emg_channels()
+        if channels is None:
+            return
+        events = self._analysis_events()
+        if not events:
+            return
+        rms_n = self._parse_rms_window_samples()
+        if rms_n is None:
+            return
+        try:
+            threshold = float(self.cci_threshold_pct.get()) / 100.0
+            if not 0 <= threshold <= 1:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid input", "Simultaneous-activation threshold must be between 0 and 100 percent.")
+            return
+        try:
+            p95 = self._session_p95_rms(channels, rms_n)
+        except Exception as exc:
+            messagebox.showerror("Normalization error", str(exc))
+            return
+        results, errors = [], []
+        for label, onset, window in events:
+            try:
+                times, x1, x2 = self._extract_pair(onset, window, channels)
+                e1 = self._moving_rms(x1 * 1_000_000.0, rms_n) / p95[channels[0]]
+                e2 = self._moving_rms(x2 * 1_000_000.0, rms_n) / p95[channels[1]]
+                overlap = np.minimum(e1, e2)
+                denom = float(np.sum(e1) + np.sum(e2))
+                cci = 100.0 * (2.0 * float(np.sum(overlap)) / denom) if denom > 0 else float("nan")
+                results.append((label, times, e1, e2, cci, float(np.mean(overlap)), 100.0 * float(np.mean((e1 >= threshold) & (e2 >= threshold)))))
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+        if not results:
+            messagebox.showerror("5b analysis error", "No event windows could be processed:\n" + "\n".join(errors[:8]))
+            return
+        fig = Figure(figsize=(10, max(6, 2.4 * len(results) + 2)), dpi=120)
+        for i, (label, times, e1, e2, _cci, _common, _pct) in enumerate(results):
+            ax = fig.add_subplot(len(results) + 1, 1, i + 1)
+            ax.plot(times, e1, label=channels[0], lw=0.9)
+            ax.plot(times, e2, label=channels[1], lw=0.9)
+            ax.fill_between(times, 0, np.minimum(e1, e2), color="purple", alpha=.20, label="common activation")
+            ax.set_ylabel("P95 norm.")
+            ax.set_title(label, loc="left", fontsize=9)
+            ax.grid(alpha=.25)
+            if i == 0: ax.legend(loc="upper right", fontsize=8)
+        ax = fig.add_subplot(len(results) + 1, 1, len(results) + 1)
+        labels = [r[0] for r in results]
+        cci = [r[4] for r in results]; common = [r[5] for r in results]; simultaneous = [r[6] for r in results]
+        pos = np.arange(len(results)); width=.25
+        ax.bar(pos-width, cci, width, label="CCI (%)"); ax.bar(pos, common, width, label="Common activation"); ax.bar(pos+width, simultaneous, width, label="Simultaneous (%)")
+        ax.set_xticks(pos, labels, rotation=45, ha="right"); ax.grid(axis="y", alpha=.25); ax.legend(fontsize=8)
+        fig.subplots_adjust(left=.10, right=.98, bottom=.12, top=.96, hspace=.75)
+        subtitle = (f"5b: {channels[0]} vs {channels[1]}; session-wide P95 RMS normalization; "
+                    f"CCI = 2Σmin(E1,E2)/Σ(E1+E2) × 100; threshold {threshold * 100:g}% P95")
+        self._show_figure(
+            fig,
+            subtitle,
+            window_title="EDF EMG co-contraction analysis",
+            default_png_name=self._default_analysis_png_name("EMG_CCI", analysis_type="cocontraction"),
+            replace_existing=False,
+        )
+        if errors: messagebox.showwarning("Some 5b windows skipped", "\n".join(errors[:8]))
+
+    def run_coherence_analysis(self) -> None:
+        if coherence is None:
+            messagebox.showerror("Missing dependency", f"SciPy is required for Step 5c:\n{SCIPY_IMPORT_ERROR}\n\nInstall: pip install scipy")
+            return
+        if Figure is None or FigureCanvasTkAgg is None:
+            messagebox.showerror("Missing dependency", f"Matplotlib is required for analysis figures:\n{MPL_IMPORT_ERROR}")
+            return
+        channels = self._require_two_emg_channels()
+        if channels is None: return
+        events = self._analysis_events()
+        if not events: return
+        band = self._parse_float_pair(self.coherence_low_hz, self.coherence_high_hz, "Coherence summary band")
+        if band is None: return
+        try:
+            segment_s = float(self.coherence_segment_s.get())
+            if segment_s <= 0: raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid input", "Welch segment length must be greater than zero seconds."); return
+        sfreq = float(self.raw.info["sfreq"]); nperseg = max(2, int(round(segment_s * sfreq)))
+        if band[1] >= sfreq / 2:
+            messagebox.showerror("Invalid input", "Coherence summary band must be below Nyquist."); return
+        results, errors = [], []
+        for label, onset, window in events:
+            try:
+                _times, x1, x2 = self._extract_pair(onset, window, channels)
+                n = min(len(x1), len(x2), nperseg)
+                if n < 4: raise RuntimeError("Window is too short for coherence estimation.")
+                freq, coh = coherence(x1, x2, fs=sfreq, nperseg=n, detrend="constant")
+                inband = (freq >= band[0]) & (freq <= band[1])
+                if not np.any(inband): raise RuntimeError("No coherence frequency bins fall within the requested summary band.")
+                results.append((label, freq, coh, float(np.mean(coh[inband]))))
+            except Exception as exc: errors.append(f"{label}: {exc}")
+        if not results:
+            messagebox.showerror("5c analysis error", "No event windows could be processed:\n" + "\n".join(errors[:8])); return
+        fig = Figure(figsize=(10, 7), dpi=120); ax1 = fig.add_subplot(211)
+        for label, freq, coh, mean_coh in results: ax1.plot(freq, coh, lw=1, label=f"{label} (mean={mean_coh:.3f})")
+        ax1.axvspan(*band, color="orange", alpha=.15, label="summary band"); ax1.set_xlim(0, max(band[1] * 1.5, 20)); ax1.set_ylim(0, 1); ax1.set_ylabel("Magnitude-squared coherence"); ax1.grid(alpha=.25); ax1.legend(fontsize=8)
+        ax2 = fig.add_subplot(212); labels=[r[0] for r in results]; means=[r[3] for r in results]
+        ax2.bar(np.arange(len(means)), means, color="#d9eaf7"); ax2.set_xticks(np.arange(len(means)), labels, rotation=45, ha="right"); ax2.set_ylim(0,1); ax2.set_ylabel(f"Mean coherence ({band[0]:g}-{band[1]:g} Hz)"); ax2.set_xlabel("Event window"); ax2.grid(axis="y", alpha=.25)
+        fig.subplots_adjust(left=.10,right=.98,bottom=.16,top=.95,hspace=.40)
+        subtitle=(f"5c: {channels[0]} vs {channels[1]}; bandpass {self.low_hz.get()}-{self.high_hz.get()} Hz; Welch {segment_s:g}-s segments; PMID 39700629-informed {band[0]:g}-{band[1]:g} Hz summary")
+        self._show_figure(
+            fig,
+            subtitle,
+            window_title="EDF intermuscular coherence analysis",
+            default_png_name=self._default_analysis_png_name("EMG_coherence", analysis_type="coherence"),
+            replace_existing=False,
+        )
+        if errors: messagebox.showwarning("Some 5c windows skipped", "\n".join(errors[:8]))
+
     # ------------------------- Signal analysis -------------------------
+    def run_psd_analysis(self) -> None:
+        """Plot Welch PSDs for all selected channels in each selected event window."""
+        if welch is None:
+            messagebox.showerror("Missing dependency", f"SciPy is required for Step 5d:\n{SCIPY_IMPORT_ERROR}\n\nInstall: pip install scipy")
+            return
+        if Figure is None or FigureCanvasTkAgg is None:
+            messagebox.showerror("Missing dependency", f"Matplotlib is required for analysis figures:\n{MPL_IMPORT_ERROR}")
+            return
+        if not self.selected_channels:
+            messagebox.showwarning("No channels selected", "Select one or more channels in subpart 1 first.")
+            return
+        events = self._analysis_events()
+        if not events:
+            return
+        try:
+            segment_s = float(self.psd_segment_s.get())
+            if segment_s <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid input", "Welch segment length must be greater than zero seconds.")
+            return
+        sfreq = float(self.raw.info["sfreq"])
+        requested_nperseg = max(2, int(round(segment_s * sfreq)))
+        _low, high = self._get_bandpass() or (None, None)
+        results, errors = [], []
+        for label, onset, window in events:
+            spectra = []
+            for channel in self.selected_channels:
+                try:
+                    _times, data_volts, _window_label = self._extract_raw_window_data(onset, window, channel)
+                    nperseg = min(len(data_volts), requested_nperseg)
+                    if nperseg < 4:
+                        raise RuntimeError("Window is too short for Welch PSD estimation.")
+                    freq, power_v2_hz = welch(data_volts, fs=sfreq, nperseg=nperseg, detrend="constant")
+                    power_db = 10.0 * np.log10(np.maximum(power_v2_hz * 1_000_000_000_000.0, np.finfo(float).tiny))
+                    spectra.append((channel, freq, power_db, nperseg))
+                except Exception as exc:
+                    errors.append(f"{label}, {channel}: {exc}")
+            if spectra:
+                results.append((label, spectra))
+        if not results:
+            messagebox.showerror("5d analysis error", "No event windows could be processed:\n" + "\n".join(errors[:8]))
+            return
+        # Use identical y-limits in every panel.  Derive them from all displayed PSD
+        # samples, rather than allowing Matplotlib to autoscale each event separately.
+        # The lower bound is padded slightly below the most negative PSD value so no
+        # trace is clipped while retaining a scale appropriate to this analysis run.
+        displayed_power = np.concatenate([
+            power_db[np.isfinite(power_db) & (freq >= 0) & (freq <= high)]
+            for _label, spectra in results
+            for _channel, freq, power_db, _nperseg in spectra
+        ])
+        global_min = float(np.min(displayed_power))
+        global_max = float(np.max(displayed_power))
+        data_range = global_max - global_min
+        # A constant fallback retains visible limits if a PSD is numerically flat.
+        y_padding = max(0.5, 0.02 * data_range)
+        common_ymin = global_min - y_padding
+        common_ymax = global_max + y_padding
+
+        fig = Figure(figsize=(10, max(4, 2.7 * len(results))), dpi=120)
+        for index, (label, spectra) in enumerate(results, start=1):
+            ax = fig.add_subplot(len(results), 1, index)
+            for channel, freq, power_db, _nperseg in spectra:
+                ax.plot(freq, power_db, label=channel, lw=1.0)
+            ax.set_xlim(0, high)
+            ax.set_ylim(common_ymin, common_ymax)
+            ax.set_ylabel("PSD (dB re 1 µV²/Hz)")
+            ax.set_title(label, loc="left", fontsize=9)
+            ax.grid(alpha=.25)
+            ax.legend(loc="best", fontsize=8)
+            if index == len(results):
+                ax.set_xlabel("Frequency (Hz)")
+        actual_segments = sorted({nperseg for _label, spectra in results for _ch, _freq, _power, nperseg in spectra})
+        segment_note = ", ".join(f"{n / sfreq:g} s" for n in actual_segments)
+        fig.subplots_adjust(left=.11, right=.98, bottom=.10, top=.95, hspace=.55)
+        subtitle = (f"5d: Welch PSD of raw, unfiltered signal; "
+                    f"requested segment {segment_s:g} s; used segment(s) {segment_note}")
+        self._show_figure(
+            fig,
+            subtitle,
+            window_title="EDF Welch spectral density analysis",
+            default_png_name=self._default_analysis_png_name("EMG", analysis_type="welch_psd"),
+            replace_existing=False,
+        )
+        if errors:
+            messagebox.showwarning("Some 5d traces skipped", "\n".join(errors[:8]))
+
     def run_signal_analysis(self) -> None:
         if Figure is None or FigureCanvasTkAgg is None:
             messagebox.showerror("Missing dependency", f"Matplotlib is required for analysis figures:\n{MPL_IMPORT_ERROR}")
@@ -649,26 +1111,9 @@ class EDFAnalysisSetupGUI:
             return
 
         mode = self.analysis_mode.get()
-        baseline_selection = self._selected_annotation_indices("baseline") if mode != "stimulation" else []
-        stim_selection = self._selected_annotation_indices("stimulation") if mode != "baseline" else []
-
-        if mode != "stimulation" and not baseline_selection:
-            messagebox.showwarning("No baseline annotation", "Select one baseline annotation in subpart 3 first.")
+        events = self._analysis_events()
+        if events is None:
             return
-        if mode != "baseline" and not stim_selection:
-            messagebox.showwarning("No stimulation annotations", "Select one or more stimulation annotations in subpart 4 first.")
-            return
-
-        baseline_window = None
-        if baseline_selection:
-            baseline_window = self._parse_float_pair(self.baseline_tmin, self.baseline_tmax, "Baseline window")
-            if baseline_window is None:
-                return
-        stim_window = None
-        if stim_selection:
-            stim_window = self._parse_float_pair(self.stim_tmin, self.stim_tmax, "Stimulation window")
-            if stim_window is None:
-                return
         rms_window_samples = self._parse_rms_window_samples()
         if rms_window_samples is None:
             return
@@ -680,26 +1125,12 @@ class EDFAnalysisSetupGUI:
             datasets: list[np.ndarray] = []
             errors: list[str] = []
 
-            if baseline_selection and baseline_window is not None:
-                baseline_idx = baseline_selection[0]
-                baseline_onset, _duration, _desc = self._get_annotation_by_index(baseline_idx)
+            for label, onset, window in events:
                 try:
-                    datasets.append(self._extract_analysis_values(baseline_onset, baseline_window, rms_window_samples, channel))
-                    labels.append("pre-stimulus")
+                    datasets.append(self._extract_analysis_values(onset, window, rms_window_samples, channel))
+                    labels.append(label)
                 except Exception as exc:
-                    errors.append(f"{channel} baseline #{baseline_idx}: {exc}")
-
-            annotation_occurrences: dict[str, int] = {}
-            if stim_window is not None:
-                for idx in stim_selection:
-                    onset, _duration, desc = self._get_annotation_by_index(idx)
-                    try:
-                        datasets.append(self._extract_analysis_values(onset, stim_window, rms_window_samples, channel))
-                        annotation_occurrences[desc] = annotation_occurrences.get(desc, 0) + 1
-                        occurrence = annotation_occurrences[desc]
-                        labels.append(desc if occurrence == 1 else f"{desc}_{occurrence}")
-                    except Exception as exc:
-                        errors.append(f"{channel} stimulation #{idx}: {exc}")
+                    errors.append(f"{channel} {label}: {exc}")
 
             if not datasets:
                 all_errors.extend(errors)
@@ -749,42 +1180,39 @@ class EDFAnalysisSetupGUI:
         if all_errors:
             messagebox.showwarning("Some analysis windows skipped", "Some windows could not be analyzed:\n" + "\n".join(all_errors[:8]))
 
-    def _default_analysis_png_name(self, channel: str | None = None) -> str:
+    def _default_analysis_png_name(self, channel: str | None = None, analysis_type: str = "boxwhisker") -> str:
+        """Return a descriptive default name for a manually saved analysis figure."""
         channel = (channel or (self.selected_channels[0] if self.selected_channels else "channel")).strip() or "channel"
         safe_channel = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in channel).strip("_") or "channel"
-        return f"{Path(self.edf_path).stem}_{safe_channel}_boxwhisker.png"
+        safe_type = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in analysis_type).strip("_") or "analysis"
+        return f"{Path(self.edf_path).stem}_{safe_channel}_{safe_type}.png"
 
     # ------------------------- Preview actions -------------------------
     def preview_baseline(self) -> None:
-        if self.analysis_mode.get() == "stimulation":
-            messagebox.showinfo("Ignored", "Baseline settings are ignored for stimulation-only mode.")
-            return
-        selection = self._selected_annotation_indices("baseline")
-        if not selection:
-            messagebox.showwarning("No annotation selected", "Select one baseline annotation first.")
-            return
-        window = self._parse_float_pair(self.baseline_tmin, self.baseline_tmax, "Baseline window")
-        if window is None:
-            return
-        idx = selection[0]
-        onset, _duration, desc = self._get_annotation_by_index(idx)
-        self._preview_single(idx, onset, window, f"Baseline preview: {desc}")
+        if self.analysis_mode.get()=="stimulation":
+            messagebox.showinfo("Ignored","Baseline settings are ignored for stimulation-only mode."); return
+        events=self._analysis_events()
+        if events: self._preview_events([e for e in events if e[0].startswith(("pre-stimulus","baseline:"))],"Baseline preview")
 
     def preview_stimulation(self) -> None:
-        if self.analysis_mode.get() == "baseline":
-            messagebox.showinfo("Ignored", "Stimulation settings are ignored for baseline-only mode.")
-            return
-        selection = self._selected_annotation_indices("stimulation")
-        if not selection:
-            messagebox.showwarning("No annotation selected", "Select one or more stimulation annotations first.")
-            return
-        window = self._parse_float_pair(self.stim_tmin, self.stim_tmax, "Stimulation window")
-        if window is None:
-            return
+        if self.analysis_mode.get()=="baseline":
+            messagebox.showinfo("Ignored","Stimulation settings are ignored for baseline-only mode."); return
+        events=self._analysis_events()
+        if events: self._preview_events([e for e in events if not e[0].startswith(("pre-stimulus","baseline:"))],"Stimulation preview")
 
-        # Preview every selected stimulation annotation. The figure window is scrollable,
-        # so large selections can be reviewed without truncating the subplot list.
-        self._preview_multiple(selection, window, title=f"Stimulation preview ({len(selection)} selected)")
+    def _preview_events(self, events: list[tuple[str,float,tuple[float,float]]], title: str) -> None:
+        if not events: return
+        fig=Figure(figsize=(10,max(4,2.2*len(events))),dpi=100); errors=[]; plotted=0
+        for n,(label,onset,window) in enumerate(events,1):
+            try: times,data,window_label=self._extract_preview_data(onset,window)
+            except Exception as exc: errors.append(f"{label}: {exc}"); continue
+            plotted+=1; ax=fig.add_subplot(len(events),1,n); ax.plot(times,data,lw=.7); ax.set_title(f"{label} ({window_label})",fontsize=9)
+            ax.set_ylabel(self.selected_channels[0] if self.selected_channels else "",fontsize=8); ax.grid(alpha=.25)
+            if n==len(events): ax.set_xlabel("Time from segment start (s)")
+        if not plotted:
+            messagebox.showerror("Preview error","No selected windows could be previewed:\n"+"\n".join(errors[:5])); return
+        fig.tight_layout(); self._show_figure(fig,title)
+        if errors: messagebox.showwarning("Some previews skipped","\n".join(errors[:5]))
 
     def _annotations_in_window(self, anchor_onset: float, window: tuple[float, float]) -> list[tuple[int, float, float, str]]:
         """Return annotation onsets that fall inside a preview window, in anchor-relative seconds."""
@@ -1076,23 +1504,23 @@ class EDFAnalysisSetupGUI:
             return None
         mode = self.analysis_mode.get()
 
-        baseline_annotation = None
-        baseline_window = None
+        baseline_annotation = None; baseline_window = None; baseline_pair=[]
         if mode in ("baseline", "baseline_and_stimulation"):
-            baseline_selection = self._selected_annotation_indices("baseline")
-            if baseline_selection:
-                _onset, _duration, baseline_annotation = self._get_annotation_by_index(baseline_selection[0])
-                baseline_window = self._parse_float_pair(self.baseline_tmin, self.baseline_tmax, "Baseline window")
-
-        stim_annotations: list[str] = []
-        stim_window = None
+            if self.baseline_window_mode.get()=="pair":
+                baseline_pair=[self._get_annotation_by_index(i)[2] for i in self.baseline_pair_indices]
+            else:
+                selection=self._selected_annotation_indices("baseline")
+                if selection:
+                    _o,_d,baseline_annotation=self._get_annotation_by_index(selection[0])
+                    baseline_window=self._parse_float_pair(self.baseline_tmin,self.baseline_tmax,"Baseline window")
+        stim_annotations=[]; stim_window=None; stim_pairs=[]
         if mode in ("stimulation", "baseline_and_stimulation"):
-            stim_selection = self._selected_annotation_indices("stimulation")
-            for idx in stim_selection:
-                _onset, _duration, desc = self._get_annotation_by_index(idx)
-                stim_annotations.append(desc)
-            if stim_selection:
-                stim_window = self._parse_float_pair(self.stim_tmin, self.stim_tmax, "Stimulation window")
+            if self.stim_window_mode.get()=="pair":
+                stim_pairs=[[self._get_annotation_by_index(i)[2] for i in pair] for pair in self.stim_pair_indices]
+            else:
+                for idx in self._selected_annotation_indices("stimulation"):
+                    stim_annotations.append(self._get_annotation_by_index(idx)[2])
+                if stim_annotations: stim_window=self._parse_float_pair(self.stim_tmin,self.stim_tmax,"Stimulation window")
 
         return AnalysisConfig(
             edf_path=self.edf_path,
@@ -1104,6 +1532,10 @@ class EDFAnalysisSetupGUI:
             baseline_window_s=baseline_window,
             stimulation_annotations=stim_annotations,
             stimulation_window_s=stim_window,
+            baseline_boundary_annotations=baseline_pair or None,
+            stimulation_boundary_pairs=stim_pairs or None,
+            baseline_window_mode=self.baseline_window_mode.get(),
+            stimulation_window_mode=self.stim_window_mode.get(),
         )
 
     def save_config(self) -> None:
